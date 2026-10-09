@@ -105,8 +105,8 @@ final class FullscreenOverlayController: ObservableObject {
 
 final class OverlayViewState: ObservableObject {
     @Published var showHUD: Bool = false
-    @Published var keystoneStrength: Float = 0.28
-    @Published var stretchBalance: Float = 0.46
+    @Published var keystoneStrength: Float = 0.22
+    @Published var stretchBalance: Float = 0.56
 }
 
 private class KeyCatchingWindow: NSWindow {

@@ -55,8 +55,8 @@ struct PerspectiveMetalView: NSViewRepresentable {
         // Smooth interpolation state
         private var targetAngle: Double = 90.0
         private var smoothedAngle: Double = 90.0
-        private var keystoneStrength: Float = 0.28
-        private var stretchBalance: Float = 0.46
+        private var keystoneStrength: Float = 0.22
+        private var stretchBalance: Float = 0.56
 
         struct PerspectiveUniforms {
             var angle: Float
