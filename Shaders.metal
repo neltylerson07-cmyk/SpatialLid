@@ -69,7 +69,7 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
         // Keystone taper ramps up smoothly below 45°
         lowAngleKeystoneBoost += 1.0f * (0.8f * lowAngleProgress + 0.6f * lowAngleProgress * lowAngleProgress);
         // Stretch balance drops smoothly below 45°
-        lowAngleStretchMultiplier -= 1.4f * lowAngleProgress;
+        lowAngleStretchMultiplier -= 1.8f * lowAngleProgress;
     }
 
     // 1. Perspective Depth Coordinate Warping
