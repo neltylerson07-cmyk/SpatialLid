@@ -51,9 +51,18 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float tiltAmount = sin(delta) * transitionProgress;
     float s = 1.0f - uv.y; // 0.0 at bottom hinge, 1.0 at top bezel
 
+    // Progressive low-angle compensation:
+    // Below 45°, decrease stretch balance as the angle gets lower to compress vertically.
+    const float angle45Rad = 0.7853982f; // 45° in radians
+    float lowAngleStretchMultiplier = 1.0f;
+    if (currentTheta < angle45Rad) {
+        float lowAngleProgress = clamp((angle45Rad - currentTheta) / angle45Rad, 0.0f, 1.0f);
+        lowAngleStretchMultiplier -= 0.55f * lowAngleProgress;
+    }
+
     // 1. Perspective Depth Coordinate Warping
     float effectiveKeystone = uniforms.keystoneStrength * transitionProgress;
-    float effectiveStretch = uniforms.stretchBalance;
+    float effectiveStretch = max(uniforms.stretchBalance * lowAngleStretchMultiplier, 0.01f);
     float w = max(1.0f - (s * tiltAmount * effectiveKeystone), 0.05f);
     float warpedX = ((uv.x - 0.5f) / w) + 0.5f;
     float warpedY = 1.0f - (s * (1.0f - (tiltAmount * (1.0f - effectiveStretch))) / w);
