@@ -3,11 +3,18 @@ import IOKit
 import IOKit.hid
 import os
 import Combine
+import QuartzCore
 
 final class LidSensor: ObservableObject {
-    // Thread-safe angle read directly by Metal without touching SwiftUI
+    // Thread-safe angle & velocity read directly by Metal without touching SwiftUI
     private var _atomicAngle: Double = 90.0
+    private var _atomicVelocity: Double = 0.0
+    private var _atomicTimestamp: CFTimeInterval = 0.0
     private let lock = os_unfair_lock_t.allocate(capacity: 1)
+
+    // Sliding window of angle measurements for smooth velocity regression
+    private var sampleHistory: [(timestamp: CFTimeInterval, angle: Double)] = []
+    private let historyWindowDuration: CFTimeInterval = 0.14 // 140ms sliding window
 
     var latestAngle: Double {
         os_unfair_lock_lock(lock)
@@ -16,8 +23,43 @@ final class LidSensor: ObservableObject {
         return val
     }
 
+    var latestVelocity: Double {
+        os_unfair_lock_lock(lock)
+        let val = _atomicVelocity
+        os_unfair_lock_unlock(lock)
+        return val
+    }
+
+    /// Extrapolates angle ahead in time based on smoothed angular velocity (dead-reckoning / lookahead)
+    func extrapolatedAngle(lookahead: Double) -> Double {
+        os_unfair_lock_lock(lock)
+        let angle = _atomicAngle
+        let velocity = _atomicVelocity
+        let timestamp = _atomicTimestamp
+        os_unfair_lock_unlock(lock)
+
+        let now = CACurrentMediaTime()
+        let elapsedSinceSample = max(0.0, now - timestamp)
+
+        // If no new readings arrived for > 150ms, velocity gracefully fades to zero
+        let decay = max(0.0, 1.0 - (elapsedSinceSample / 0.15))
+        let effectiveVelocity = velocity * decay
+
+        let totalForwardTime = elapsedSinceSample + lookahead
+        var forwardDelta = effectiveVelocity * totalForwardTime
+
+        // Soft-clamp the maximum forward projection delta (±12°)
+        // to prevent jarring overshoot during rapid hand movements
+        let maxLeadDegrees = 12.0
+        forwardDelta = min(max(forwardDelta, -maxLeadDegrees), maxLeadDegrees)
+
+        let projected = angle + forwardDelta
+        return min(max(projected, 0.0), 180.0)
+    }
+
     // Published for UI text label and automatic angle tracking
     @Published var displayAngle: Double = 90.0
+    @Published var displayVelocity: Double = 0.0
 
     var currentAngle: Double {
         displayAngle
@@ -115,10 +157,52 @@ final class LidSensor: ObservableObject {
                     let angle = Double(rawValue)
 
                     if angle >= 0 && angle <= 180 {
-                        // Store the pure hardware sensor angle directly
+                        let now = CACurrentMediaTime()
+
+                        // Maintain sliding history of angle samples over the last window
+                        self.sampleHistory.append((timestamp: now, angle: angle))
+                        let cutoff = now - self.historyWindowDuration
+                        self.sampleHistory.removeAll { $0.timestamp < cutoff }
+
+                        // Calculate angular velocity using linear regression slope (degrees / sec)
+                        var calculatedVelocity = 0.0
+                        let count = self.sampleHistory.count
+                        if count >= 2 {
+                            var sumT = 0.0
+                            var sumA = 0.0
+                            for sample in self.sampleHistory {
+                                sumT += sample.timestamp
+                                sumA += sample.angle
+                            }
+                            let meanT = sumT / Double(count)
+                            let meanA = sumA / Double(count)
+
+                            var numerator = 0.0
+                            var denominator = 0.0
+                            for sample in self.sampleHistory {
+                                let dt = sample.timestamp - meanT
+                                let da = sample.angle - meanA
+                                numerator += dt * da
+                                denominator += dt * dt
+                            }
+
+                            if denominator > 1e-6 {
+                                calculatedVelocity = numerator / denominator
+                                // Clamp to physical human bounds
+                                calculatedVelocity = min(max(calculatedVelocity, -360.0), 360.0)
+                                // Deadzone tiny jitter (< 1.5 deg/sec)
+                                if abs(calculatedVelocity) < 1.5 {
+                                    calculatedVelocity = 0.0
+                                }
+                            }
+                        }
+
+                        // Store the pure hardware sensor angle, velocity, and timestamp
                         os_unfair_lock_lock(self.lock)
                         let prev = self._atomicAngle
                         self._atomicAngle = angle
+                        self._atomicVelocity = calculatedVelocity
+                        self._atomicTimestamp = now
                         os_unfair_lock_unlock(self.lock)
 
                         // Detect 90° threshold crossing immediately
@@ -131,6 +215,7 @@ final class LidSensor: ObservableObject {
                             self.uiUpdateCounter = 0
                             DispatchQueue.main.async {
                                 self.displayAngle = angle
+                                self.displayVelocity = calculatedVelocity
                                 self.onAngleChanged?(angle)
                             }
                         }

@@ -107,6 +107,7 @@ final class OverlayViewState: ObservableObject {
     @Published var showHUD: Bool = false
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
+    @Published var lookaheadTime: Double = 0.18
 }
 
 private class KeyCatchingWindow: NSWindow {
@@ -143,7 +144,9 @@ private struct FullscreenPerspectiveContainer: View {
             // Fullscreen Metal Canvas
             PerspectiveMetalView(
                 snapshot: snapshot,
-                lidAngle: sensor.currentAngle,
+                sensor: sensor,
+                fallbackAngle: sensor.currentAngle,
+                lookahead: state.lookaheadTime,
                 keystoneStrength: state.keystoneStrength,
                 stretchBalance: state.stretchBalance,
                 onFirstFrame: onFirstFrame
@@ -183,10 +186,15 @@ private struct FullscreenPerspectiveContainer: View {
                         Text("Perspective Tuner")
                             .font(.headline)
                         Spacer()
-                        Text(String(format: "%.1f°", sensor.currentAngle))
-                            .font(.system(.subheadline, design: .monospaced))
-                            .bold()
-                            .foregroundStyle(.tint)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(String(format: "%.1f°", sensor.currentAngle))
+                                .font(.system(.subheadline, design: .monospaced))
+                                .bold()
+                                .foregroundStyle(.tint)
+                            Text(String(format: "%+.0f°/s", sensor.displayVelocity))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     Divider()
@@ -215,6 +223,18 @@ private struct FullscreenPerspectiveContainer: View {
                         Slider(value: $state.stretchBalance, in: 0.01...1.5, step: 0.01)
                     }
 
+                    // Lookahead / Extrapolation Slider
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Lookahead (Delay Compensation):")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2fs", state.lookaheadTime))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.lookaheadTime, in: 0.0...0.5, step: 0.02)
+                    }
+
                     Divider()
 
                     // Quick Actions
@@ -222,6 +242,7 @@ private struct FullscreenPerspectiveContainer: View {
                         Button("Reset") {
                             state.keystoneStrength = 0.18
                             state.stretchBalance = 0.56
+                            state.lookaheadTime = 0.18
                         }
                         .font(.caption)
                         .buttonStyle(.bordered)
@@ -234,6 +255,7 @@ private struct FullscreenPerspectiveContainer: View {
                             TUNED PARAMETERS:
                             keystoneStrength = \(String(format: "%.2ff", state.keystoneStrength))
                             stretchBalance   = \(String(format: "%.2ff", state.stretchBalance))
+                            lookaheadTime    = \(String(format: "%.2fs", state.lookaheadTime))
                             -------------------------------
                             """)
                         }

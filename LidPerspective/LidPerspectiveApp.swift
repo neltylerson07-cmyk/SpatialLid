@@ -76,10 +76,15 @@ struct ContentView: View {
                     Label("Lid Angle", systemImage: "angle")
                         .font(.headline)
                     Spacer()
-                    Text(String(format: "%.1f°", sensor.displayAngle))
-                        .font(.system(.title3, design: .monospaced))
-                        .bold()
-                        .foregroundStyle(.tint)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(String(format: "%.1f°", sensor.displayAngle))
+                            .font(.system(.title3, design: .monospaced))
+                            .bold()
+                            .foregroundStyle(.tint)
+                        Text(String(format: "%+.0f°/s", sensor.displayVelocity))
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 ProgressView(value: min(max(sensor.displayAngle, 0), 180), total: 180)

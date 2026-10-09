@@ -5,7 +5,9 @@ import MetalPerformanceShaders
 
 struct PerspectiveMetalView: NSViewRepresentable {
     var snapshot: CGImage?
-    var lidAngle: Double
+    var sensor: LidSensor? = nil
+    var fallbackAngle: Double = 90.0
+    var lookahead: Double = 0.18
     var keystoneStrength: Float
     var stretchBalance: Float
     var onFirstFrame: (() -> Void)? = nil
@@ -38,9 +40,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
         }
 
         context.coordinator.onFirstFrame = onFirstFrame
+        context.coordinator.sensor = sensor
+        context.coordinator.lookahead = lookahead
         context.coordinator.updateParameters(
             snapshot: snapshot,
-            targetAngle: lidAngle,
+            targetAngle: fallbackAngle,
             keystone: keystoneStrength,
             balance: stretchBalance
         )
@@ -52,6 +56,8 @@ struct PerspectiveMetalView: NSViewRepresentable {
 
     final class Coordinator: NSObject, MTKViewDelegate {
         var onFirstFrame: (() -> Void)?
+        var sensor: LidSensor?
+        var lookahead: Double = 0.18
         private var hasFiredFirstFrame = false
 
         private var device: MTLDevice?
@@ -164,6 +170,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
                   let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass),
                   let texture = texture,
                   let blurredTexture = blurredTexture else { return }
+
+            let targetAngle: Double
+            if let sensor = self.sensor {
+                targetAngle = sensor.extrapolatedAngle(lookahead: self.lookahead)
+            } else {
+                targetAngle = self.targetAngle
+            }
 
             let smoothingFactor = 0.25
             self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
