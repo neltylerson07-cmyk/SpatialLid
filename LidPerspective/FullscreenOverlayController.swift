@@ -105,7 +105,7 @@ final class FullscreenOverlayController: ObservableObject {
 
 final class OverlayViewState: ObservableObject {
     @Published var showHUD: Bool = false
-    @Published var keystoneStrength: Float = 0.22
+    @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
 }
 
@@ -220,7 +220,7 @@ private struct FullscreenPerspectiveContainer: View {
                     // Quick Actions
                     HStack {
                         Button("Reset") {
-                            state.keystoneStrength = 0.22
+                            state.keystoneStrength = 0.18
                             state.stretchBalance = 0.56
                         }
                         .font(.caption)

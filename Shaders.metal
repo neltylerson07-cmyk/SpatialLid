@@ -54,16 +54,18 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     // Progressive low-angle dual compensation (below 45°):
     // Simultaneously increases horizontal keystone taper and decreases vertical
     // stretch balance as the lid angle closes toward 0°.
-    const float angle45Rad = 0.7853982f; // 45° in radians
+    const float angle45Rad = 1.3963f; // 45° in radians
     float lowAngleKeystoneBoost = 1.0f;
     float lowAngleStretchMultiplier = 1.0f;
     if (currentTheta < angle45Rad) {
         float lowAngleProgress = clamp((angle45Rad - currentTheta) / angle45Rad, 0.0f, 1.0f);
         // Keystone taper ramps up smoothly below 45°
-        lowAngleKeystoneBoost += 1.0f * (0.8f * lowAngleProgress + 0.2f * lowAngleProgress * lowAngleProgress);
+        lowAngleKeystoneBoost += 1.0f * (0.8f * lowAngleProgress + 0.6f * lowAngleProgress * lowAngleProgress);
         // Stretch balance drops smoothly below 45°
-        lowAngleStretchMultiplier -= 0.45f * lowAngleProgress;
+        lowAngleStretchMultiplier -= 1.4f * lowAngleProgress;
     }
+    
+
 
     // 1. Perspective Depth Coordinate Warping
     float effectiveKeystone = uniforms.keystoneStrength * transitionProgress * lowAngleKeystoneBoost;
@@ -91,7 +93,7 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float localBlur = clamp(sweepFactor * gradientIntensity * transitionProgress, 0.0f, 1.0f);
 
     // 3. Dynamic Silhouette Edge Bleed
-    float edgeBleed = mix(0.003f, 0.080f, localBlur) * transitionProgress;
+    float edgeBleed = mix(0.003f, 0.040f, localBlur) * transitionProgress;
 
     // Cull pixels that fall entirely beyond the outward bloom area
     if (finalUV.x < -edgeBleed || finalUV.x > (1.0f + edgeBleed) ||

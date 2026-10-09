@@ -18,6 +18,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.framebufferOnly = true
         
+        // Assign display/snapshot color space to prevent sRGB gamut compression
+        if let colorSpace = snapshot?.colorSpace ?? NSScreen.main?.colorSpace?.cgColorSpace ?? CGColorSpace(name: CGColorSpace.displayP3) {
+            mtkView.colorspace = colorSpace
+        }
+        
         // Match the display's native refresh rate (up to 120Hz ProMotion)
         mtkView.isPaused = false
         mtkView.enableSetNeedsDisplay = false
@@ -25,6 +30,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MTKView, context: Context) {
+        // Keep color space in sync if the window moves across displays or receives a new snapshot
+        if let colorSpace = snapshot?.colorSpace ?? nsView.window?.screen?.colorSpace?.cgColorSpace ?? NSScreen.main?.colorSpace?.cgColorSpace {
+            if nsView.colorspace != colorSpace {
+                nsView.colorspace = colorSpace
+            }
+        }
+
         context.coordinator.onFirstFrame = onFirstFrame
         context.coordinator.updateParameters(
             snapshot: snapshot,
@@ -55,7 +67,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         // Smooth interpolation state
         private var targetAngle: Double = 90.0
         private var smoothedAngle: Double = 90.0
-        private var keystoneStrength: Float = 0.22
+        private var keystoneStrength: Float = 0.18
         private var stretchBalance: Float = 0.56
 
         struct PerspectiveUniforms {
@@ -153,7 +165,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
                   let texture = texture,
                   let blurredTexture = blurredTexture else { return }
 
-            let smoothingFactor = 0.35
+            let smoothingFactor = 0.25
             self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
             
             let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1))
