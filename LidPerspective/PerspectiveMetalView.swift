@@ -1,24 +1,20 @@
-//private var currentAngle: Double = 90.0
-//private var keystoneStrength: Float = 0.22
-//private var stretchBalance: Float = 0.56
-
 import SwiftUI
 import MetalKit
 import simd
 import MetalPerformanceShaders
-
 
 struct PerspectiveMetalView: NSViewRepresentable {
     var snapshot: CGImage?
     var lidAngle: Double
     var keystoneStrength: Float
     var stretchBalance: Float
+    var onFirstFrame: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> MTKView {
         let mtkView = MTKView()
         mtkView.device = MTLCreateSystemDefaultDevice()
         mtkView.delegate = context.coordinator
-        mtkView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        mtkView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.framebufferOnly = true
         
@@ -29,6 +25,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MTKView, context: Context) {
+        context.coordinator.onFirstFrame = onFirstFrame
         context.coordinator.updateParameters(
             snapshot: snapshot,
             targetAngle: lidAngle,
@@ -42,6 +39,9 @@ struct PerspectiveMetalView: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, MTKViewDelegate {
+        var onFirstFrame: (() -> Void)?
+        private var hasFiredFirstFrame = false
+
         private var device: MTLDevice?
         private var commandQueue: MTLCommandQueue?
         private var pipelineState: MTLRenderPipelineState?
@@ -55,11 +55,9 @@ struct PerspectiveMetalView: NSViewRepresentable {
         // Smooth interpolation state
         private var targetAngle: Double = 90.0
         private var smoothedAngle: Double = 90.0
-        private var keystoneStrength: Float = 0.22
-        private var stretchBalance: Float = 0.56
+        private var keystoneStrength: Float = 0.28
+        private var stretchBalance: Float = 0.46
 
-        
-        
         struct PerspectiveUniforms {
             var angle: Float
             var aspect: Float
@@ -117,7 +115,6 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 // Pre-blur the snapshot once using Metal Performance Shaders
                 if let sourceTexture = loadedTexture {
                     self.blurredTexture = makeBlurredTexture(from: sourceTexture, device: device, sigma: 40)
-                    //200
                 }
             }
         }
@@ -156,8 +153,6 @@ struct PerspectiveMetalView: NSViewRepresentable {
                   let texture = texture,
                   let blurredTexture = blurredTexture else { return }
 
-            // Inside PerspectiveMetalView.Coordinator.draw(in:)
-            // Use 0.55 - 0.70 to eliminate stepping while allowing the extrapolation to lead
             let smoothingFactor = 0.35
             self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
             
@@ -174,7 +169,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
             encoder.setRenderPipelineState(pipelineState)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PerspectiveUniforms>.stride, index: 0)
             encoder.setFragmentTexture(texture, index: 0)
-            encoder.setFragmentTexture(blurredTexture, index: 1) // Bind blurred texture to slot 1
+            encoder.setFragmentTexture(blurredTexture, index: 1)
             encoder.setFragmentSamplerState(textureSampler, index: 0)
 
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
@@ -182,6 +177,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
 
             commandBuffer.present(drawable)
             commandBuffer.commit()
+
+            if !hasFiredFirstFrame {
+                hasFiredFirstFrame = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.onFirstFrame?()
+                }
+            }
         }
     }
 }

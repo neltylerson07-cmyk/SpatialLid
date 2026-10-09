@@ -1,17 +1,23 @@
-
-
 import Cocoa
 import SwiftUI
+import Combine
 
 @MainActor
-final class FullscreenOverlayController {
-    private var window: NSWindow?
+final class FullscreenOverlayController: ObservableObject {
+    private var window: KeyCatchingWindow?
+    @Published private(set) var isShowing: Bool = false
+    private var onDismissal: (() -> Void)?
+    private let viewState = OverlayViewState()
 
-    func show(snapshot: CGImage, sensor: LidSensor) {
+    func show(snapshot: CGImage, sensor: LidSensor, onDismiss: (() -> Void)? = nil) {
+        if window != nil {
+            dismiss()
+        }
+
+        self.onDismissal = onDismiss
         guard let screen = NSScreen.main else { return }
 
-        // 1. MUST use screen.frame (covers physical display including Dock & Menu Bar),
-        // not screen.visibleFrame (which cuts off the Dock and Menu Bar).
+        // Must use screen.frame (covers physical display including Dock & Menu Bar)
         let overlayWindow = KeyCatchingWindow(
             contentRect: screen.frame,
             styleMask: [.borderless],
@@ -19,14 +25,24 @@ final class FullscreenOverlayController {
             defer: false
         )
 
-        // 2. Set to ScreenSaver level: sits higher than the Dock, Menu Bar, and popups
+        // Start fully transparent to eliminate any black flash while Metal textures compile
+        overlayWindow.alphaValue = 0.0
+        overlayWindow.isOpaque = false
+        overlayWindow.backgroundColor = .clear
+        overlayWindow.hasShadow = false
+
+        overlayWindow.onEscape = { [weak self] in
+            self?.dismiss()
+        }
+
+        overlayWindow.onToggleHUD = { [weak self] in
+            self?.viewState.showHUD.toggle()
+        }
+
+        // Set to ScreenSaver level: sits higher than Dock, Menu Bar, and popups
         overlayWindow.level = NSWindow.Level(Int(CGWindowLevelForKey(.screenSaverWindow)))
 
-        // 3. Collection behaviors:
-        // - canJoinAllSpaces: visible on every virtual desktop
-        // - fullScreenAuxiliary: allows it to display over native Fullscreen apps
-        // - stationary: does not move during Mission Control / Exposé gestures
-        // - ignoresCycle: skipped by Cmd+Tab window cycling
+        // Collection behaviors
         overlayWindow.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -34,14 +50,23 @@ final class FullscreenOverlayController {
             .ignoresCycle
         ]
 
-        overlayWindow.isOpaque = true
-        overlayWindow.backgroundColor = .black
-        overlayWindow.hasShadow = false
-
         let hostView = NSHostingView(
             rootView: FullscreenPerspectiveContainer(
                 snapshot: snapshot,
                 sensor: sensor,
+                state: viewState,
+                onFirstFrame: { [weak overlayWindow] in
+                    guard let window = overlayWindow else { return }
+                    // Buttery smooth crossfade as soon as the first frame is rendered
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.12
+                        context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        window.animator().alphaValue = 1.0
+                    } completionHandler: { [weak overlayWindow] in
+                        overlayWindow?.backgroundColor = .black
+                        overlayWindow?.isOpaque = true
+                    }
+                },
                 onDismiss: { [weak self] in
                     self?.dismiss()
                 }
@@ -51,21 +76,55 @@ final class FullscreenOverlayController {
         overlayWindow.contentView = hostView
         overlayWindow.makeKeyAndOrderFront(nil)
         self.window = overlayWindow
+        self.isShowing = true
     }
 
     func dismiss() {
-        window?.orderOut(nil)
+        guard let activeWindow = window else { return }
         window = nil
+        isShowing = false
+        activeWindow.isOpaque = false
+        activeWindow.backgroundColor = .clear
+
+        let handler = self.onDismissal
+        self.onDismissal = nil
+
+        // Smooth dissolve back to live desktop
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            activeWindow.animator().alphaValue = 0.0
+        }, completionHandler: {
+            activeWindow.orderOut(nil)
+            DispatchQueue.main.async {
+                handler?()
+            }
+        })
     }
 }
 
+final class OverlayViewState: ObservableObject {
+    @Published var showHUD: Bool = false
+    @Published var keystoneStrength: Float = 0.28
+    @Published var stretchBalance: Float = 0.46
+}
+
 private class KeyCatchingWindow: NSWindow {
+    var onEscape: (() -> Void)?
+    var onToggleHUD: (() -> Void)?
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC key
-            self.orderOut(nil)
+            if let onEscape = onEscape {
+                onEscape()
+            } else {
+                self.orderOut(nil)
+            }
+        } else if event.charactersIgnoringModifiers?.lowercased() == "h" {
+            onToggleHUD?()
         } else {
             super.keyDown(with: event)
         }
@@ -75,12 +134,9 @@ private class KeyCatchingWindow: NSWindow {
 private struct FullscreenPerspectiveContainer: View {
     let snapshot: CGImage
     @ObservedObject var sensor: LidSensor
+    @ObservedObject var state: OverlayViewState
+    var onFirstFrame: (() -> Void)? = nil
     let onDismiss: () -> Void
-
-    // Live tunable parameters
-    @State private var keystoneStrength: Float = 0.28
-    @State private var stretchBalance: Float = 0.46
-    @State private var showHUD: Bool = true
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -88,37 +144,40 @@ private struct FullscreenPerspectiveContainer: View {
             PerspectiveMetalView(
                 snapshot: snapshot,
                 lidAngle: sensor.currentAngle,
-                keystoneStrength: keystoneStrength,
-                stretchBalance: stretchBalance
+                keystoneStrength: state.keystoneStrength,
+                stretchBalance: state.stretchBalance,
+                onFirstFrame: onFirstFrame
             )
             .ignoresSafeArea()
 
-            // Top-right controls: HUD Toggle & ESC Button
-            HStack(spacing: 8) {
-                Button(action: { showHUD.toggle() }) {
-                    Text(showHUD ? "Hide HUD (H)" : "Tune Parameters")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
+            // HUD Controls (toggleable via H key or button, hidden by default for pure immersion)
+            if state.showHUD {
+                // Top-right controls: HUD Toggle & ESC Button
+                HStack(spacing: 8) {
+                    Button(action: { state.showHUD.toggle() }) {
+                        Text("Hide HUD (H)")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
 
-                Button(action: onDismiss) {
-                    Text("ESC to Exit")
-                        .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
+                    Button(action: onDismiss) {
+                        Text("ESC to Exit")
+                            .font(.caption)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-            }
-            .padding(16)
+                .padding(16)
+                .transition(.opacity.combined(with: .move(edge: .top)))
 
-            // Live Tweaker Panel (Floating HUD)
-            if showHUD {
+                // Live Tweaker Panel (Floating HUD)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         Text("Perspective Tuner")
@@ -138,10 +197,10 @@ private struct FullscreenPerspectiveContainer: View {
                             Text("Keystone Taper:")
                                 .font(.caption)
                             Spacer()
-                            Text(String(format: "%.2f", keystoneStrength))
+                            Text(String(format: "%.2f", state.keystoneStrength))
                                 .font(.caption.monospacedDigit())
                         }
-                        Slider(value: $keystoneStrength, in: 0.0...1.0, step: 0.01)
+                        Slider(value: $state.keystoneStrength, in: 0.0...1.0, step: 0.01)
                     }
 
                     // Stretch / Aspect Balance Slider
@@ -150,10 +209,10 @@ private struct FullscreenPerspectiveContainer: View {
                             Text("Stretch Balance:")
                                 .font(.caption)
                             Spacer()
-                            Text(String(format: "%.2f", stretchBalance))
+                            Text(String(format: "%.2f", state.stretchBalance))
                                 .font(.caption.monospacedDigit())
                         }
-                        Slider(value: $stretchBalance, in: 0.01...1.5, step: 0.01)
+                        Slider(value: $state.stretchBalance, in: 0.01...1.5, step: 0.01)
                     }
 
                     Divider()
@@ -161,8 +220,8 @@ private struct FullscreenPerspectiveContainer: View {
                     // Quick Actions
                     HStack {
                         Button("Reset") {
-                            keystoneStrength = 0.22
-                            stretchBalance = 0.56
+                            state.keystoneStrength = 0.22
+                            state.stretchBalance = 0.56
                         }
                         .font(.caption)
                         .buttonStyle(.bordered)
@@ -173,8 +232,8 @@ private struct FullscreenPerspectiveContainer: View {
                             print("""
                             -------------------------------
                             TUNED PARAMETERS:
-                            keystoneStrength = \(String(format: "%.2ff", keystoneStrength))
-                            stretchBalance   = \(String(format: "%.2ff", stretchBalance))
+                            keystoneStrength = \(String(format: "%.2ff", state.keystoneStrength))
+                            stretchBalance   = \(String(format: "%.2ff", state.stretchBalance))
                             -------------------------------
                             """)
                         }
@@ -189,7 +248,9 @@ private struct FullscreenPerspectiveContainer: View {
                 .shadow(radius: 20)
                 .padding(20)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: state.showHUD)
     }
 }

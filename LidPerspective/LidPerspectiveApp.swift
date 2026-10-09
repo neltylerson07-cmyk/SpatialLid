@@ -2,10 +2,29 @@ import SwiftUI
 
 @main
 struct LidPerspectiveApp: App {
-    @StateObject private var sensor = LidSensor()
-    @StateObject private var captureManager = ScreenCaptureManager()
-    @StateObject private var bootstrap = AppBootstrap()
-    private let overlayController = FullscreenOverlayController()
+    @StateObject private var sensor: LidSensor
+    @StateObject private var captureManager: ScreenCaptureManager
+    @StateObject private var bootstrap: AppBootstrap
+    @StateObject private var overlayController: FullscreenOverlayController
+    @StateObject private var autoManager: AutoPerspectiveManager
+
+    init() {
+        let sensorInstance = LidSensor()
+        let captureInstance = ScreenCaptureManager()
+        let overlayInstance = FullscreenOverlayController()
+        let bootstrapInstance = AppBootstrap()
+        let autoInstance = AutoPerspectiveManager(
+            sensor: sensorInstance,
+            captureManager: captureInstance,
+            overlayController: overlayInstance
+        )
+
+        _sensor = StateObject(wrappedValue: sensorInstance)
+        _captureManager = StateObject(wrappedValue: captureInstance)
+        _overlayController = StateObject(wrappedValue: overlayInstance)
+        _bootstrap = StateObject(wrappedValue: bootstrapInstance)
+        _autoManager = StateObject(wrappedValue: autoInstance)
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -13,7 +32,8 @@ struct LidPerspectiveApp: App {
                 sensor: sensor,
                 captureManager: captureManager,
                 bootstrap: bootstrap,
-                overlayController: overlayController
+                overlayController: overlayController,
+                autoManager: autoManager
             )
         }
         .windowResizability(.contentSize)
@@ -24,14 +44,14 @@ struct ContentView: View {
     @ObservedObject var sensor: LidSensor
     @ObservedObject var captureManager: ScreenCaptureManager
     @ObservedObject var bootstrap: AppBootstrap
-    let overlayController: FullscreenOverlayController
+    @ObservedObject var overlayController: FullscreenOverlayController
+    @ObservedObject var autoManager: AutoPerspectiveManager
 
-    @State private var isCapturing = false
     @State private var isRunningDiagnostics = false
     @State private var diagnosticMessage: String?
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 18) {
             // Header
             VStack(spacing: 6) {
                 Image(systemName: "laptopcomputer.and.arrow.down")
@@ -70,6 +90,10 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
+                    Text("90°")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
                     Text("Flat (180°)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -79,19 +103,56 @@ struct ContentView: View {
             .background(.quaternary.opacity(0.5))
             .cornerRadius(10)
 
-            // Primary action button
+            // Automatic Detection card
+            VStack(spacing: 10) {
+                HStack {
+                    Label("Automatic Perspective", systemImage: "bolt.badge.automatic.fill")
+                        .font(.headline)
+                    Spacer()
+                    Toggle("", isOn: $autoManager.isAutoModeEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusIndicatorColor)
+                        .frame(width: 8, height: 8)
+
+                    Text(autoManager.statusDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    if autoManager.isArmed && autoManager.isAutoModeEnabled {
+                        Text("< 90° trigger")
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.green.opacity(0.15))
+                            .foregroundStyle(.green)
+                            .cornerRadius(4)
+                    }
+                }
+            }
+            .padding()
+            .background(.quaternary.opacity(0.4))
+            .cornerRadius(10)
+
+            // Manual trigger action button
             Button {
-                launchPerspectiveOverlay()
+                autoManager.triggerPerspective()
             } label: {
                 HStack {
-                    if isCapturing {
+                    if autoManager.isCapturing {
                         ProgressView()
                             .controlSize(.small)
                             .padding(.trailing, 4)
                         Text("Capturing Screen...")
                     } else {
                         Image(systemName: "play.fill")
-                        Text("Enter Perspective Mode")
+                        Text("Enter Perspective Mode (Manual)")
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -99,7 +160,7 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(isCapturing)
+            .disabled(autoManager.isCapturing || overlayController.isShowing)
 
             // Secondary actions
             HStack(spacing: 12) {
@@ -130,25 +191,29 @@ struct ContentView: View {
 
             // Instructions footer
             VStack(alignment: .leading, spacing: 4) {
-                Label("Press ESC while in overlay to exit", systemImage: "info.circle")
-                Label("Toggle 'Tune Parameters' (H) to adjust keystone and stretch", systemImage: "slider.horizontal.3")
+                Label("Closing lid (<90°) automatically captures screen and warps", systemImage: "sparkles")
+                Label("Open lid past 90° or press ESC to exit", systemImage: "info.circle")
+                Label("Toggle 'Tune Parameters' (H) in overlay to adjust keystone", systemImage: "slider.horizontal.3")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(24)
-        .frame(width: 380)
+        .frame(width: 400)
     }
 
-    private func launchPerspectiveOverlay() {
-        isCapturing = true
-        Task {
-            await captureManager.captureCurrentScreen()
-            if let snapshot = captureManager.latestSnapshot {
-                overlayController.show(snapshot: snapshot, sensor: sensor)
-            }
-            isCapturing = false
+    private var statusIndicatorColor: Color {
+        if !autoManager.isAutoModeEnabled {
+            return .gray
+        } else if overlayController.isShowing {
+            return .blue
+        } else if autoManager.isCapturing {
+            return .orange
+        } else if autoManager.isArmed {
+            return .green
+        } else {
+            return .yellow
         }
     }
 

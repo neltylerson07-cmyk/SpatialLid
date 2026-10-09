@@ -16,12 +16,14 @@ final class LidSensor: ObservableObject {
         return val
     }
 
-    // Published only for the low-frequency UI text label
+    // Published for UI text label and automatic angle tracking
     @Published var displayAngle: Double = 90.0
 
     var currentAngle: Double {
         displayAngle
     }
+
+    var onAngleChanged: ((Double) -> Void)?
 
     private var hidManager: IOHIDManager?
     private var lidDevice: IOHIDDevice?
@@ -115,15 +117,21 @@ final class LidSensor: ObservableObject {
                     if angle >= 0 && angle <= 180 {
                         // Store the pure hardware sensor angle directly
                         os_unfair_lock_lock(self.lock)
+                        let prev = self._atomicAngle
                         self._atomicAngle = angle
                         os_unfair_lock_unlock(self.lock)
 
-                        // Update UI label at ~12 Hz to prevent main thread overhead
+                        // Detect 90° threshold crossing immediately
+                        let crossedThreshold = (prev >= 90.0 && angle < 90.0) || (prev < 90.0 && angle >= 90.0)
+
+                        // Update UI label at ~12 Hz to prevent main thread overhead,
+                        // or immediately when crossing 90° threshold
                         self.uiUpdateCounter += 1
-                        if self.uiUpdateCounter >= 10 {
+                        if crossedThreshold || self.uiUpdateCounter >= 10 {
                             self.uiUpdateCounter = 0
                             DispatchQueue.main.async {
                                 self.displayAngle = angle
+                                self.onAngleChanged?(angle)
                             }
                         }
                     }
