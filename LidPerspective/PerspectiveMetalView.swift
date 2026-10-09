@@ -10,6 +10,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
     var lookahead: Double = 0.18
     var keystoneStrength: Float
     var stretchBalance: Float
+    var keyboardReflection: Float = 0.48
+    var keyboardTilt: Float = 0.35
+    var keyboardReach: Float = 0.38
+    var keyboardBacklight: Float = 1.50
+    var keyboardOffset: Float = -0.02
+    var keyboardWidth: Float = 0.88
+    var keyboardDepthBlur: Float = 0.30
     var isSettling: Bool = false
     var onSettleCompleted: (() -> Void)? = nil
     var onFirstFrame: (() -> Void)? = nil
@@ -56,7 +63,14 @@ struct PerspectiveMetalView: NSViewRepresentable {
             snapshot: snapshot,
             targetAngle: fallbackAngle,
             keystone: keystoneStrength,
-            balance: stretchBalance
+            balance: stretchBalance,
+            keyboardReflection: keyboardReflection,
+            keyboardTilt: keyboardTilt,
+            keyboardReach: keyboardReach,
+            keyboardBacklight: keyboardBacklight,
+            keyboardOffset: keyboardOffset,
+            keyboardWidth: keyboardWidth,
+            keyboardDepthBlur: keyboardDepthBlur
         )
     }
 
@@ -85,6 +99,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var smoothedAngle: Double = 90.0
         private var keystoneStrength: Float = 0.18
         private var stretchBalance: Float = 0.56
+        private var keyboardReflection: Float = 0.48
+        private var keyboardTilt: Float = 0.35
+        private var keyboardReach: Float = 0.38
+        private var keyboardBacklight: Float = 1.50
+        private var keyboardOffset: Float = -0.02
+        private var keyboardWidth: Float = 0.88
+        private var keyboardDepthBlur: Float = 0.30
 
         // Tween / Settle to full screen
         private(set) var isSettling: Bool = false
@@ -99,9 +120,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
             var keystoneStrength: Float
             var stretchBalance: Float
             var settleProgress: Float = 0.0
-            var _padding1: Float = 0.0
-            var _padding2: Float = 0.0
-            var _padding3: Float = 0.0
+            var keyboardReflection: Float = 0.48
+            var keyboardTilt: Float = 0.35
+            var keyboardReach: Float = 0.38
+            var keyboardBacklight: Float = 1.50
+            var keyboardOffset: Float = -0.02
+            var keyboardWidth: Float = 0.88
+            var keyboardDepthBlur: Float = 0.30
         }
 
         override init() {
@@ -147,10 +172,29 @@ struct PerspectiveMetalView: NSViewRepresentable {
             textureSampler = device.makeSamplerState(descriptor: desc)
         }
         
-        func updateParameters(snapshot: CGImage?, targetAngle: Double, keystone: Float, balance: Float) {
+        func updateParameters(
+            snapshot: CGImage?,
+            targetAngle: Double,
+            keystone: Float,
+            balance: Float,
+            keyboardReflection: Float,
+            keyboardTilt: Float,
+            keyboardReach: Float,
+            keyboardBacklight: Float,
+            keyboardOffset: Float,
+            keyboardWidth: Float,
+            keyboardDepthBlur: Float
+        ) {
             self.targetAngle = targetAngle
             self.keystoneStrength = keystone
             self.stretchBalance = balance
+            self.keyboardReflection = keyboardReflection
+            self.keyboardTilt = keyboardTilt
+            self.keyboardReach = keyboardReach
+            self.keyboardBacklight = keyboardBacklight
+            self.keyboardOffset = keyboardOffset
+            self.keyboardWidth = keyboardWidth
+            self.keyboardDepthBlur = keyboardDepthBlur
 
             if let snapshot = snapshot, snapshot !== lastLoadedSnapshotID, let device = self.device {
                 self.lastLoadedSnapshotID = snapshot
@@ -244,7 +288,14 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 aspect: aspect,
                 keystoneStrength: self.keystoneStrength,
                 stretchBalance: self.stretchBalance,
-                settleProgress: settleFactor
+                settleProgress: settleFactor,
+                keyboardReflection: self.keyboardReflection,
+                keyboardTilt: self.keyboardTilt,
+                keyboardReach: self.keyboardReach,
+                keyboardBacklight: self.keyboardBacklight,
+                keyboardOffset: self.keyboardOffset,
+                keyboardWidth: self.keyboardWidth,
+                keyboardDepthBlur: self.keyboardDepthBlur
             )
 
             encoder.setRenderPipelineState(pipelineState)

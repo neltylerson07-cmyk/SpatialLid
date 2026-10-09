@@ -32,6 +32,7 @@ final class FullscreenOverlayController: ObservableObject {
             backing: .buffered,
             defer: false
         )
+        overlayWindow.setFrame(screen.frame, display: true)
 
         // Start fully transparent to eliminate any black flash while Metal textures compile
         overlayWindow.alphaValue = 0.0
@@ -79,6 +80,8 @@ final class FullscreenOverlayController: ObservableObject {
                     self?.dismiss()
                 }
             )
+            .ignoresSafeArea()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         )
 
         overlayWindow.contentView = hostView
@@ -159,6 +162,13 @@ final class OverlayViewState: ObservableObject {
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
     @Published var lookaheadTime: Double = 0.18
+    @Published var keyboardReflection: Float = 0.48
+    @Published var keyboardTilt: Float = 0.35
+    @Published var keyboardReach: Float = 0.38
+    @Published var keyboardBacklight: Float = 1.50
+    @Published var keyboardOffset: Float = -0.02
+    @Published var keyboardWidth: Float = 0.88
+    @Published var keyboardDepthBlur: Float = 0.30
 
     // Settle animation state
     @Published var isSettling: Bool = false
@@ -204,6 +214,13 @@ private struct FullscreenPerspectiveContainer: View {
                 lookahead: state.lookaheadTime,
                 keystoneStrength: state.keystoneStrength,
                 stretchBalance: state.stretchBalance,
+                keyboardReflection: state.keyboardReflection,
+                keyboardTilt: state.keyboardTilt,
+                keyboardReach: state.keyboardReach,
+                keyboardBacklight: state.keyboardBacklight,
+                keyboardOffset: state.keyboardOffset,
+                keyboardWidth: state.keyboardWidth,
+                keyboardDepthBlur: state.keyboardDepthBlur,
                 isSettling: state.isSettling,
                 onSettleCompleted: {
                     state.onSettleCompleted?()
@@ -240,7 +257,7 @@ private struct FullscreenPerspectiveContainer: View {
                 .transition(.opacity.combined(with: .move(edge: .top)))
 
                 // Live Tweaker Panel (Floating HUD)
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("Perspective Tuner")
                             .font(.headline)
@@ -258,8 +275,13 @@ private struct FullscreenPerspectiveContainer: View {
 
                     Divider()
 
+                    // SECTION 1: PERSPECTIVE WARP
+                    Text("PERSPECTIVE WARP")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+
                     // Keystone Strength Slider
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 2) {
                         HStack {
                             Text("Keystone Taper:")
                                 .font(.caption)
@@ -271,7 +293,7 @@ private struct FullscreenPerspectiveContainer: View {
                     }
 
                     // Stretch / Aspect Balance Slider
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 2) {
                         HStack {
                             Text("Stretch Balance:")
                                 .font(.caption)
@@ -283,9 +305,9 @@ private struct FullscreenPerspectiveContainer: View {
                     }
 
                     // Lookahead / Extrapolation Slider
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 2) {
                         HStack {
-                            Text("Lookahead (Delay Compensation):")
+                            Text("Lookahead (Delay):")
                                 .font(.caption)
                             Spacer()
                             Text(String(format: "%.2fs", state.lookaheadTime))
@@ -296,25 +318,130 @@ private struct FullscreenPerspectiveContainer: View {
 
                     Divider()
 
+                    // SECTION 2: KEYBOARD REFLECTION
+                    Text("KEYBOARD REFLECTION")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+
+                    // Reflection Opacity Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Reflection Opacity:")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", state.keyboardReflection))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardReflection, in: 0.0...1.0, step: 0.01)
+                    }
+
+                    // Bottom Edge Offset / Shift Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Bottom Edge Offset:")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%+.2f", state.keyboardOffset))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardOffset, in: -0.10...0.20, step: 0.01)
+                    }
+
+                    // Keyboard Width Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Keyboard Width:")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", state.keyboardWidth))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardWidth, in: 0.60...1.00, step: 0.02)
+                    }
+
+                    // Reflection Tilt / Angle Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Reflection Angle / Tilt:")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", state.keyboardTilt))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardTilt, in: 0.15...2.0, step: 0.05)
+                    }
+
+                    // Vertical Reach / Height Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Vertical Reach (Height):")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", state.keyboardReach))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardReach, in: 0.12...0.60, step: 0.02)
+                    }
+
+                    // Depth Blur (DoF) Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Depth Blur (DoF):")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", state.keyboardDepthBlur))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardDepthBlur, in: 0.0...2.5, step: 0.05)
+                    }
+
+                    // Backlight Luminescence Slider
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Key Backlight Glow:")
+                                .font(.caption)
+                            Spacer()
+                            Text(String(format: "%.2f", state.keyboardBacklight))
+                                .font(.caption.monospacedDigit())
+                        }
+                        Slider(value: $state.keyboardBacklight, in: 0.0...2.5, step: 0.05)
+                    }
+
+                    Divider()
+
                     // Quick Actions
                     HStack {
                         Button("Reset") {
                             state.keystoneStrength = 0.18
                             state.stretchBalance = 0.56
                             state.lookaheadTime = 0.18
+                            state.keyboardReflection = 0.48
+                            state.keyboardTilt = 0.35
+                            state.keyboardReach = 0.38
+                            state.keyboardBacklight = 1.50
+                            state.keyboardOffset = -0.02
+                            state.keyboardWidth = 0.88
+                            state.keyboardDepthBlur = 0.30
                         }
                         .font(.caption)
                         .buttonStyle(.bordered)
 
                         Spacer()
 
-                        Button("Log Values to Console") {
+                        Button("Log Values") {
                             print("""
                             -------------------------------
                             TUNED PARAMETERS:
-                            keystoneStrength = \(String(format: "%.2ff", state.keystoneStrength))
-                            stretchBalance   = \(String(format: "%.2ff", state.stretchBalance))
-                            lookaheadTime    = \(String(format: "%.2fs", state.lookaheadTime))
+                            keystoneStrength   = \(String(format: "%.2ff", state.keystoneStrength))
+                            stretchBalance     = \(String(format: "%.2ff", state.stretchBalance))
+                            lookaheadTime      = \(String(format: "%.2fs", state.lookaheadTime))
+                            keyboardReflection = \(String(format: "%.2ff", state.keyboardReflection))
+                            keyboardTilt       = \(String(format: "%.2ff", state.keyboardTilt))
+                            keyboardReach      = \(String(format: "%.2ff", state.keyboardReach))
+                            keyboardBacklight  = \(String(format: "%.2ff", state.keyboardBacklight))
+                            keyboardOffset     = \(String(format: "%.2ff", state.keyboardOffset))
+                            keyboardWidth      = \(String(format: "%.2ff", state.keyboardWidth))
+                            keyboardDepthBlur  = \(String(format: "%.2ff", state.keyboardDepthBlur))
                             -------------------------------
                             """)
                         }
@@ -322,8 +449,8 @@ private struct FullscreenPerspectiveContainer: View {
                         .buttonStyle(.borderedProminent)
                     }
                 }
-                .padding(16)
-                .frame(width: 290)
+                .padding(14)
+                .frame(width: 300)
                 .background(.ultraThinMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .shadow(radius: 20)
@@ -332,6 +459,8 @@ private struct FullscreenPerspectiveContainer: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
+        .ignoresSafeArea()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.2), value: state.showHUD)
     }
 }
