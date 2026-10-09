@@ -37,11 +37,161 @@ vertex RasterizerData vertex_main(uint vertexID [[vertex_id]]) {
     return out;
 }
 
-// Synthesizes a photorealistic MacBook keyboard reflection with authentic optical Depth of Field (DoF):
+// Geometric structure for 1:1 Apple Magic Keyboard / MacBook layout
+struct KeyGeometry {
+    float centerU;
+    float halfWU;
+    float centerV;
+    float halfHV;
+    bool isKey;
+    bool isTouchId;
+    bool hasHomingBump;
+    bool hasCapsDot;
+    bool isOuterCorner;
+};
+
+// Computes key boundaries, offsets, and metadata across all 6 rows based on the official MacBook keyboard reference
+static KeyGeometry getKeyGeometry(int rowIndex, float u, float relV) {
+    KeyGeometry g;
+    g.centerU = 0.5f;
+    g.halfWU = 0.025f;
+    g.centerV = 0.5f;
+    g.halfHV = 0.39f; // Standard key covers ~78% of row height (0.5 ± 0.39)
+    g.isKey = true;
+    g.isTouchId = false;
+    g.hasHomingBump = false;
+    g.hasCapsDot = false;
+    g.isOuterCorner = false;
+
+    // Standard horizontal gap between keycaps (in normalized well width units)
+    const float gapU = 0.0055f;
+
+    if (rowIndex == 0) {
+        // FUNCTION ROW: 14 keys (Esc, 12 F-keys, Touch ID sensor)
+        const float B[15] = {0.0f, 0.095f, 0.161f, 0.227f, 0.293f, 0.359f, 0.425f, 0.491f, 0.557f, 0.623f, 0.689f, 0.755f, 0.821f, 0.887f, 1.0f};
+        for (int i = 0; i < 14; ++i) {
+            if (u <= B[i + 1] || i == 13) {
+                float left = B[i] + gapU * 0.5f;
+                float right = B[i + 1] - gapU * 0.5f;
+                g.centerU = (left + right) * 0.5f;
+                g.halfWU = max((right - left) * 0.5f, 0.005f);
+                if (i == 0) g.isOuterCorner = true; // Esc top-left fillet
+                if (i == 13) {
+                    g.isTouchId = true;
+                    g.isOuterCorner = true; // Touch ID top-right fillet
+                }
+                break;
+            }
+        }
+    } else if (rowIndex == 1) {
+        // NUMBER ROW: 14 keys (~, 1..0, -, =, Delete)
+        const float B[15] = {0.0f, 0.068f, 0.136f, 0.204f, 0.272f, 0.340f, 0.408f, 0.476f, 0.544f, 0.612f, 0.680f, 0.748f, 0.816f, 0.884f, 1.0f};
+        for (int i = 0; i < 14; ++i) {
+            if (u <= B[i + 1] || i == 13) {
+                float left = B[i] + gapU * 0.5f;
+                float right = B[i + 1] - gapU * 0.5f;
+                g.centerU = (left + right) * 0.5f;
+                g.halfWU = max((right - left) * 0.5f, 0.005f);
+                break;
+            }
+        }
+    } else if (rowIndex == 2) {
+        // TAB / QWERTY ROW: 14 keys (Tab, Q..P, [, ], \)
+        const float B[15] = {0.0f, 0.103f, 0.171f, 0.239f, 0.307f, 0.375f, 0.443f, 0.511f, 0.579f, 0.647f, 0.715f, 0.783f, 0.851f, 0.919f, 1.0f};
+        for (int i = 0; i < 14; ++i) {
+            if (u <= B[i + 1] || i == 13) {
+                float left = B[i] + gapU * 0.5f;
+                float right = B[i + 1] - gapU * 0.5f;
+                g.centerU = (left + right) * 0.5f;
+                g.halfWU = max((right - left) * 0.5f, 0.005f);
+                break;
+            }
+        }
+    } else if (rowIndex == 3) {
+        // CAPS / HOME ROW: 13 keys (Caps Lock, A..L, ;, ', Return)
+        const float B[14] = {0.0f, 0.123f, 0.191f, 0.259f, 0.327f, 0.395f, 0.463f, 0.531f, 0.599f, 0.667f, 0.735f, 0.803f, 0.871f, 1.0f};
+        for (int i = 0; i < 13; ++i) {
+            if (u <= B[i + 1] || i == 12) {
+                float left = B[i] + gapU * 0.5f;
+                float right = B[i + 1] - gapU * 0.5f;
+                g.centerU = (left + right) * 0.5f;
+                g.halfWU = max((right - left) * 0.5f, 0.005f);
+                if (i == 0) g.hasCapsDot = true; // Caps lock indicator LED
+                if (i == 4) g.hasHomingBump = true; // 'F' tactile homing bar
+                if (i == 7) g.hasHomingBump = true; // 'J' tactile homing bar
+                break;
+            }
+        }
+    } else if (rowIndex == 4) {
+        // SHIFT ROW: 12 keys (Left Shift, Z..M, ,, ., /, Right Shift)
+        const float B[13] = {0.0f, 0.158f, 0.226f, 0.294f, 0.362f, 0.430f, 0.498f, 0.566f, 0.634f, 0.702f, 0.770f, 0.838f, 1.0f};
+        for (int i = 0; i < 12; ++i) {
+            if (u <= B[i + 1] || i == 11) {
+                float left = B[i] + gapU * 0.5f;
+                float right = B[i + 1] - gapU * 0.5f;
+                g.centerU = (left + right) * 0.5f;
+                g.halfWU = max((right - left) * 0.5f, 0.005f);
+                break;
+            }
+        }
+    } else {
+        // ROW 5: BOTTOM MODIFIERS, SPACEBAR & INVERTED-T ARROW KEYS
+        // 0: Fn, 1: Control, 2: Option, 3: Command, 4: Spacebar, 5: Command, 6: Option, 7: Left Arrow, 8: Up/Down, 9: Right Arrow
+        const float B[11] = {0.0f, 0.071f, 0.142f, 0.227f, 0.322f, 0.678f, 0.773f, 0.858f, 0.905f, 0.953f, 1.0f};
+        for (int i = 0; i < 10; ++i) {
+            if (u <= B[i + 1] || i == 9) {
+                float left = B[i] + gapU * 0.5f;
+                float right = B[i + 1] - gapU * 0.5f;
+                g.centerU = (left + right) * 0.5f;
+                g.halfWU = max((right - left) * 0.5f, 0.005f);
+
+                if (i == 0) {
+                    g.isOuterCorner = true; // Fn bottom-left fillet
+                } else if (i == 7) {
+                    // Left Arrow: half-height key in bottom half
+                    if (relV > 0.50f) {
+                        g.isKey = false; // Empty aluminum topcase above Left Arrow
+                    } else {
+                        g.centerV = 0.26f;
+                        g.halfHV = 0.20f;
+                    }
+                } else if (i == 8) {
+                    // Up / Down Arrow: two stacked half-height keys
+                    if (relV > 0.50f) {
+                        g.centerV = 0.74f;
+                        g.halfHV = 0.20f;
+                    } else {
+                        g.centerV = 0.26f;
+                        g.halfHV = 0.20f;
+                    }
+                } else if (i == 9) {
+                    // Right Arrow: half-height key in bottom half
+                    g.isOuterCorner = true; // Right Arrow bottom-right fillet
+                    if (relV > 0.50f) {
+                        g.isKey = false; // Empty aluminum topcase above Right Arrow
+                    } else {
+                        g.centerV = 0.26f;
+                        g.halfHV = 0.20f;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    return g;
+}
+
+// Synthesizes an authentic MacBook keyboard reflection matching the reference hardware layout:
+// - Dynamic Screen Light Simulation: The screen acts as an active area light source illuminating the keyboard in real time.
 // - Opacity range is 45° to 90°: exactly 0 at 90° and <= 45°, holding normal full strength in the middle (~60° to 75°).
 // - Closest row (Row 0 right at the bottom hinge) is in sharp focus, full opacity, and high contrast.
 // - As rows recede in depth, all edges blur and opacity smoothly falls off, making distant rows translucent.
-static float4 sampleKeyboardReflection(float2 finalUV, float delta, float currentTheta, constant PerspectiveUniforms &uniforms) {
+static float4 sampleKeyboardReflection(float2 finalUV,
+                                        float delta,
+                                        float currentTheta,
+                                        constant PerspectiveUniforms &uniforms,
+                                        texture2d<float> blurredTexture,
+                                        sampler textureSampler) {
     const float uprightRad = 1.5707963f; // 90° in radians
     const float minAngleRad = 0.7853982f; // 45° in radians (pi / 4)
 
@@ -74,8 +224,19 @@ static float4 sampleKeyboardReflection(float2 finalUV, float delta, float curren
     float halfW = clamp(uniforms.keyboardWidth * 0.5f, 0.30f, 0.495f);
     float wellLeft = -halfW;
     float wellRight = halfW;
+    float wellWidth = wellRight - wellLeft;
     const float wellBottom = 0.00f; // Anchored directly to bottom screen edge
     float wellTop = maxReach * 0.68f;
+
+    // --- Dynamic Screen Light Simulation (Screen-Space Area Light & Radiance) ---
+    // Sample downward radiance from the blurred screen texture
+    float screenSampleX = clamp(finalUV.x, 0.02f, 0.98f);
+    // Keys near the hinge catch light from the bottom of the screen; distant keys catch light from higher up
+    float screenSampleY = clamp(1.0f - normY * 0.45f, 0.45f, 0.98f);
+    float3 screenLightDirect = blurredTexture.sample(textureSampler, float2(screenSampleX, screenSampleY)).rgb;
+    float3 screenLightAmbient = blurredTexture.sample(textureSampler, float2(0.5f, 0.75f)).rgb;
+    float3 screenRadiance = mix(screenLightAmbient, screenLightDirect, 0.75f);
+    float screenLightIntensity = clamp(1.0f - normY * 0.60f, 0.20f, 1.0f);
 
     // Continuous Depth-of-Field (DoF) optical blur parameter:
     // 0.0 at the hinge (Row 0), smoothly accelerating to > 1.0 at Row 5 and the top of the well
@@ -99,9 +260,10 @@ static float4 sampleKeyboardReflection(float2 finalUV, float delta, float curren
     float wellMaskY = smoothstep(-wellEdgeBlur, wellEdgeBlur, wellTop - vY);
     float wellMask = clamp(wellMaskX * wellMaskY, 0.0f, 1.0f);
 
-    // Base aluminum topcase (Space Gray specular sheen) spanning the full screen width
-    float3 topcaseCol = float3(0.070f, 0.072f, 0.082f);
-    float grainIntensity = 0.010f * max(1.0f - depthBlur * 0.8f, 0.0f);
+    // Base aluminum topcase (Space Gray specular sheen) illuminated by screen light
+    float3 topcaseCol = float3(0.065f, 0.067f, 0.075f);
+    topcaseCol += screenRadiance * float3(0.32f, 0.32f, 0.36f) * screenLightIntensity;
+    float grainIntensity = 0.008f * max(1.0f - depthBlur * 0.8f, 0.0f);
     topcaseCol += float3(grainIntensity) * sin(X * 380.0f);
 
     // Trackpad region (foreshortened wide rectangle centered in front of keyboard)
@@ -113,11 +275,12 @@ static float4 sampleKeyboardReflection(float2 finalUV, float delta, float curren
         float tpDist = length(max(tpD, 0.0f)) + min(max(tpD.x, tpD.y), 0.0f) - 0.006f;
         float tpBorderWidth = mix(0.003f, 0.025f, clamp(depthBlur, 0.0f, 2.0f));
         float tpBorder = smoothstep(tpBorderWidth, 0.0f, abs(tpDist));
-        topcaseCol = mix(topcaseCol, float3(0.24f, 0.25f, 0.28f), tpBorder * 0.7f);
+        float3 tpColor = float3(0.072f, 0.074f, 0.082f) + screenRadiance * float3(0.40f, 0.40f, 0.44f) * screenLightIntensity;
+        topcaseCol = mix(topcaseCol, tpColor + float3(0.18f) * tpBorder, tpBorder * 0.8f);
     }
 
     // --- 2. Keycaps and Backlight Matrix ---
-    float3 wellColor = float3(0.028f, 0.028f, 0.032f);
+    float3 wellColor = float3(0.024f, 0.024f, 0.028f);
 
     const int numRows = 6;
     float rowInterval = (wellTop - wellBottom);
@@ -131,11 +294,6 @@ static float4 sampleKeyboardReflection(float2 finalUV, float delta, float curren
     float rowY0 = wellBottom + rowNorm0 * rowInterval;
     float rowY1 = wellBottom + rowNorm1 * rowInterval;
     float rowH = (rowY1 - rowY0);
-
-    // Angled keycap height: keycaps are foreshortened (much wider than tall), with small gap
-    float keyH = rowH * 0.78f;
-    float rowCenter = rowY0 + keyH * 0.5f + (rowH - keyH) * 0.2f;
-    float rowHalfH = keyH * 0.5f;
 
     // Row depth blur factor:
     // Row 0 = 0.0 (sharpest), Row 5 = 1.0+ (heavily blurred)
@@ -151,65 +309,105 @@ static float4 sampleKeyboardReflection(float2 finalUV, float delta, float curren
     // When objects go out of focus, high-frequency spatial variation decays exponentially.
     float gridContrast = exp(-pow(rowBlur * 1.5f, 2.0f));
 
-    // Determine key center and width
-    float keyCenterX = 0.0f;
-    float keyHalfW = 0.0225f;
+    // Normalized coordinates across keyboard well
+    float normU = clamp((X - wellLeft) / wellWidth, 0.0f, 1.0f);
+    float relV = clamp((vY - rowY0) / rowH, 0.0f, 1.0f);
 
-    if (rowIndex == 5) {
-        // Spacebar row (top-most in reflection)
-        if (abs(X) <= 0.12f) {
-            keyCenterX = 0.0f;
-            keyHalfW = 0.115f;
-        } else {
-            float sideSign = sign(X);
-            float relX = abs(X) - 0.125f;
-            float k = floor(relX / 0.050f);
-            keyCenterX = sideSign * (0.125f + (k + 0.5f) * 0.050f);
-            keyHalfW = 0.022f;
-        }
+    // Exact key geometry lookup from MacBook reference layout
+    KeyGeometry geo = getKeyGeometry(rowIndex, normU, relV);
+
+    if (!geo.isKey) {
+        // Empty aluminum cutout (e.g. above Left/Right inverted-T arrows)
+        wellColor = topcaseCol;
     } else {
-        // 14 equal columns across the well width
-        float wellWidth = wellRight - wellLeft;
-        float pitch = wellWidth / 14.0f;
-        float relX = X - wellLeft;
-        float k = clamp(floor(relX / pitch), 0.0f, 13.0f);
-        keyCenterX = wellLeft + (k + 0.5f) * pitch;
-        keyHalfW = pitch * 0.44f;
+        float keyCenterX = wellLeft + geo.centerU * wellWidth;
+        float keyHalfW = geo.halfWU * wellWidth;
+        float keyCenterY = rowY0 + geo.centerV * rowH;
+        float keyHalfH = geo.halfHV * rowH;
+
+        // Keycap corner fillet radius (larger on outer corners of the keyboard well)
+        float radius = mix(0.0035f, 0.007f, rowBlur);
+        if (geo.isOuterCorner) {
+            radius = mix(0.0055f, 0.009f, rowBlur);
+        }
+
+        // Distance to rounded keycap rectangle
+        float2 d = abs(float2(X - keyCenterX, vY - keyCenterY)) - float2(keyHalfW - radius, keyHalfH - radius);
+        float dist = length(max(d, 0.0f)) + min(max(d.x, d.y), 0.0f) - radius;
+
+        // 1. Soft Keycap Mask:
+        float rawKeyMask = smoothstep(keyEdgeBlur, -keyEdgeBlur, dist);
+        float keyMask = mix(0.5f, rawKeyMask, gridContrast);
+
+        // 2. Dish shading & specular glint catching direct screen light:
+        float glintExtent = mix(keyHalfH * 0.30f, keyHalfH * 0.95f, rowBlur);
+        float topEdgeGlint = smoothstep(glintExtent, keyHalfH, vY - keyCenterY) * (0.18f * (1.0f - 0.65f * rowBlur));
+        float dishShading = 1.0f - mix(0.22f, 0.04f, rowBlur) * length(float2((X - keyCenterX) / keyHalfW, (vY - keyCenterY) / keyHalfH));
+        
+        // Keycap color: matte black base plastic + diffuse screen illumination + specular edge glint reflecting screen content
+        float3 basePlastic = float3(0.055f, 0.056f, 0.062f) * dishShading;
+        float3 keyCapDiffuse = basePlastic + screenRadiance * float3(0.22f, 0.22f, 0.25f) * screenLightIntensity;
+        float3 keyCapSpecular = screenLightDirect * (topEdgeGlint * 2.0f) * screenLightIntensity;
+        float3 keyCap = keyCapDiffuse + keyCapSpecular;
+
+        // Distinct Touch ID sensor key:
+        // A clean matte black key with a subtle, dark recessed circular sensor ring.
+        // It has NO backlight glow and NO printed legend (matches authentic Apple hardware).
+        if (geo.isTouchId) {
+            float physAspect = 0.80f / max(tilt, 0.10f);
+            float2 localCoord = float2(X - keyCenterX, (vY - keyCenterY) * physAspect);
+            float circleR = keyHalfH * 0.65f * physAspect;
+            float ringDist = abs(length(localCoord) - circleR);
+            float ring = smoothstep(mix(0.0015f, 0.0035f, rowBlur), 0.0f, ringDist);
+            float inSensor = smoothstep(0.0f, -0.002f, length(localCoord) - circleR);
+
+            // Darker sapphire sensor surface inside the ring
+            keyCap = mix(keyCap, float3(0.022f, 0.022f, 0.025f), inSensor);
+            // Subtle dark chamfer groove (darker than keycap, NOT bright glowing white)
+            keyCap = mix(keyCap, float3(0.015f, 0.015f, 0.018f), ring);
+        }
+
+        // Tactile raised homing bars on 'F' and 'J' keys
+        if (geo.hasHomingBump) {
+            float bumpY = keyCenterY - keyHalfH * 0.55f;
+            float bumpDist = length(max(abs(float2(X - keyCenterX, vY - bumpY)) - float2(0.0045f, 0.0009f), 0.0f));
+            float bump = smoothstep(mix(0.0014f, 0.004f, rowBlur), 0.0f, bumpDist);
+            keyCap += float3(0.14f) * bump * (1.0f - 0.7f * rowBlur);
+        }
+
+        // Caps Lock LED status dot indicator
+        if (geo.hasCapsDot) {
+            float dotX = keyCenterX - keyHalfW * 0.65f;
+            float dotY = keyCenterY + keyHalfH * 0.35f;
+            float dotDist = length(float2(X - dotX, vY - dotY));
+            float dot = smoothstep(mix(0.0025f, 0.0055f, rowBlur), 0.0f, dotDist);
+            keyCap = mix(keyCap, float3(0.22f, 0.88f, 0.38f) * uniforms.keyboardBacklight, dot * (1.0f - 0.4f * rowBlur));
+        }
+
+        // 3. Illuminated key legend diffusion (Touch ID key is blank):
+        if (!geo.isTouchId) {
+            float legDiffusion = 1.0f + 3.5f * rowBlur;
+            float legSpread = 3.5f / legDiffusion;
+            float legX = (X - keyCenterX) / (keyHalfW * 0.50f);
+            float legY = (vY - keyCenterY) / (keyHalfH * 0.65f);
+            float legendBrightness = (0.32f / legDiffusion) * uniforms.keyboardBacklight * mix(1.0f, 0.40f, rowDepthProgress);
+            float legend = exp(-(legX * legX + legY * legY) * legSpread) * legendBrightness;
+            keyCap += float3(0.85f, 0.90f, 1.0f) * legend;
+        }
+
+        // 4. Perimeter backlight glow dispersal (Touch ID key is not backlit):
+        float glowBrightness = geo.isTouchId ? 0.0f : clamp(uniforms.keyboardBacklight, 0.0f, 2.5f) * mix(1.0f, 0.45f, rowDepthProgress);
+        float glowSpread = mix(450.0f, 65.0f, clamp(rowBlur, 0.0f, 1.0f));
+        float glow = exp(-max(dist, 0.0f) * glowSpread) * glowBrightness;
+        float3 backlight = float3(0.92f, 0.95f, 1.0f) * 0.85f;
+        
+        // Crevice ambient occlusion: key wells are naturally shaded from direct overhead screen light
+        float creviceAO = mix(0.40f, 1.0f, keyMask);
+        float3 wellGlow = mix(float3(0.024f, 0.024f, 0.028f) * creviceAO, backlight, glow);
+
+        // Keycaps blend with backlight well based on the blurred optical mask
+        wellColor = mix(wellGlow, keyCap, keyMask);
     }
-
-    // Distance to keycap rectangle
-    float radius = mix(0.0035f, 0.008f, rowBlur);
-    float2 d = abs(float2(X - keyCenterX, vY - rowCenter)) - float2(keyHalfW - radius, rowHalfH - radius);
-    float dist = length(max(d, 0.0f)) + min(max(d.x, d.y), 0.0f) - radius;
-
-    // 1. Soft Keycap Mask:
-    float rawKeyMask = smoothstep(keyEdgeBlur, -keyEdgeBlur, dist);
-    float keyMask = mix(0.5f, rawKeyMask, gridContrast);
-
-    // 2. Dish shading & specular glint softening with distance:
-    float glintExtent = mix(rowHalfH * 0.30f, rowHalfH * 0.95f, rowBlur);
-    float topEdgeGlint = smoothstep(glintExtent, rowHalfH, vY - rowCenter) * (0.18f * (1.0f - 0.65f * rowBlur));
-    float dishShading = 1.0f - mix(0.22f, 0.04f, rowBlur) * length(float2((X - keyCenterX) / keyHalfW, (vY - rowCenter) / rowHalfH));
-    float3 keyCap = float3(0.065f, 0.067f, 0.074f) * dishShading + float3(topEdgeGlint);
-
-    // 3. Illuminated key legend diffusion & distance attenuation:
-    float legDiffusion = 1.0f + 3.5f * rowBlur;
-    float legSpread = 3.5f / legDiffusion;
-    float legX = (X - keyCenterX) / (keyHalfW * 0.50f);
-    float legY = (vY - rowCenter) / (rowHalfH * 0.65f);
-    float legendBrightness = (0.32f / legDiffusion) * uniforms.keyboardBacklight * mix(1.0f, 0.40f, rowDepthProgress);
-    float legend = exp(-(legX * legX + legY * legY) * legSpread) * legendBrightness;
-    keyCap += float3(0.85f, 0.90f, 1.0f) * legend;
-
-    // 4. Perimeter backlight glow dispersal & distance attenuation:
-    float glowSpread = mix(450.0f, 65.0f, clamp(rowBlur, 0.0f, 1.0f));
-    float glowBrightness = clamp(uniforms.keyboardBacklight, 0.0f, 2.5f) * mix(1.0f, 0.45f, rowDepthProgress);
-    float glow = exp(-max(dist, 0.0f) * glowSpread) * glowBrightness;
-    float3 backlight = float3(0.92f, 0.95f, 1.0f) * 0.85f;
-    float3 wellGlow = mix(float3(0.028f, 0.028f, 0.032f), backlight, glow);
-
-    // Keycaps blend with backlight well based on the blurred optical mask
-    wellColor = mix(wellGlow, keyCap, keyMask);
 
     // Smoothly combine well with surrounding topcase using the soft feathered wellMask
     float3 col = mix(topcaseCol, wellColor, wellMask);
@@ -314,8 +512,8 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float4 frameColor = mix(sharpColor, blurredColor, localBlur);
 
     // 5. Progressive Depth Shadow (Delayed to <= 70°)
-    const float shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
-    const float shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
+    const shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
+    const shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
     float shadowActivation = smoothstep(shadowStartAngleRad, shadowFullAngleRad, targetAngle);
 
     float maxShadowTop = 2.0f;
@@ -326,7 +524,7 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
 
     // 6. Simulated Keyboard Reflection (Active exclusively between 45° and 90°)
     if (uniforms.keyboardReflection > 0.001f && delta > 0.0001f && uniforms.settleProgress < 0.999f && currentTheta > minReflectAngleRad) {
-        float4 kbReflect = sampleKeyboardReflection(finalUV, delta, currentTheta, uniforms);
+        float4 kbReflect = sampleKeyboardReflection(finalUV, delta, currentTheta, uniforms, blurredTexture, textureSampler);
         float refAlpha = clamp(kbReflect.a * uniforms.keyboardReflection, 0.0f, 0.85f);
         // Specular reflection blend on glass: subtle attenuation of screen backlight + reflected light
         frameColor.rgb = frameColor.rgb * (1.0f - 0.25f * refAlpha) + kbReflect.rgb * refAlpha;
