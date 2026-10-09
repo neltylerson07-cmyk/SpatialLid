@@ -9,6 +9,10 @@ final class FullscreenOverlayController: ObservableObject {
     private var onDismissal: (() -> Void)?
     private let viewState = OverlayViewState()
 
+    var isSettling: Bool {
+        viewState.isSettling
+    }
+
     func show(snapshot: CGImage, sensor: LidSensor, onDismiss: (() -> Void)? = nil) {
         if window != nil {
             dismiss()
@@ -16,6 +20,10 @@ final class FullscreenOverlayController: ObservableObject {
 
         self.onDismissal = onDismiss
         guard let screen = NSScreen.main else { return }
+
+        // Reset settle state when showing fresh overlay
+        viewState.isSettling = false
+        viewState.onSettleCompleted = nil
 
         // Must use screen.frame (covers physical display including Dock & Menu Bar)
         let overlayWindow = KeyCatchingWindow(
@@ -79,7 +87,50 @@ final class FullscreenOverlayController: ObservableObject {
         self.isShowing = true
     }
 
+    /// Triggers the quick tween back to normal fullscreen, then fades out to reveal the desktop.
+    func unwarpAndDismiss(completion: (() -> Void)? = nil) {
+        guard isShowing, !viewState.isSettling else { return }
+        viewState.isSettling = true
+        viewState.onSettleCompleted = { [weak self] in
+            self?.fadeAndDismiss(completion: completion)
+        }
+    }
+
+    /// Cancels settling in progress if user resumes moving the lid.
+    func cancelSettling() {
+        if viewState.isSettling {
+            viewState.isSettling = false
+            viewState.onSettleCompleted = nil
+        }
+    }
+
+    /// Smoothly fades out the overlay window to reveal the live desktop underneath.
+    func fadeAndDismiss(completion: (() -> Void)? = nil) {
+        guard let activeWindow = window else { return }
+        window = nil
+        isShowing = false
+        activeWindow.isOpaque = false
+        activeWindow.backgroundColor = .clear
+
+        let handler = self.onDismissal
+        self.onDismissal = nil
+
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            activeWindow.animator().alphaValue = 0.0
+        }, completionHandler: {
+            activeWindow.orderOut(nil)
+            DispatchQueue.main.async {
+                handler?()
+                completion?()
+            }
+        })
+    }
+
+    /// Immediate dismissal (e.g. lid opened past 90° or ESC pressed)
     func dismiss() {
+        cancelSettling()
         guard let activeWindow = window else { return }
         window = nil
         isShowing = false
@@ -108,6 +159,10 @@ final class OverlayViewState: ObservableObject {
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
     @Published var lookaheadTime: Double = 0.18
+
+    // Settle animation state
+    @Published var isSettling: Bool = false
+    var onSettleCompleted: (() -> Void)?
 }
 
 private class KeyCatchingWindow: NSWindow {
@@ -149,6 +204,10 @@ private struct FullscreenPerspectiveContainer: View {
                 lookahead: state.lookaheadTime,
                 keystoneStrength: state.keystoneStrength,
                 stretchBalance: state.stretchBalance,
+                isSettling: state.isSettling,
+                onSettleCompleted: {
+                    state.onSettleCompleted?()
+                },
                 onFirstFrame: onFirstFrame
             )
             .ignoresSafeArea()

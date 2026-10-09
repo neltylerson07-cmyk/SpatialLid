@@ -10,6 +10,8 @@ struct PerspectiveMetalView: NSViewRepresentable {
     var lookahead: Double = 0.18
     var keystoneStrength: Float
     var stretchBalance: Float
+    var isSettling: Bool = false
+    var onSettleCompleted: (() -> Void)? = nil
     var onFirstFrame: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> MTKView {
@@ -42,6 +44,14 @@ struct PerspectiveMetalView: NSViewRepresentable {
         context.coordinator.onFirstFrame = onFirstFrame
         context.coordinator.sensor = sensor
         context.coordinator.lookahead = lookahead
+        context.coordinator.onSettleCompleted = onSettleCompleted
+
+        if isSettling && !context.coordinator.isSettling {
+            context.coordinator.startSettling()
+        } else if !isSettling && context.coordinator.isSettling {
+            context.coordinator.cancelSettling()
+        }
+
         context.coordinator.updateParameters(
             snapshot: snapshot,
             targetAngle: fallbackAngle,
@@ -76,11 +86,22 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var keystoneStrength: Float = 0.18
         private var stretchBalance: Float = 0.56
 
+        // Tween / Settle to full screen
+        private(set) var isSettling: Bool = false
+        private var settleStartTime: CFTimeInterval = 0.0
+        private let settleDuration: CFTimeInterval = 0.32 // Quick 320ms tween to full screen
+        private var frozenAngle: Double = 90.0
+        var onSettleCompleted: (() -> Void)?
+
         struct PerspectiveUniforms {
             var angle: Float
             var aspect: Float
             var keystoneStrength: Float
             var stretchBalance: Float
+            var settleProgress: Float = 0.0
+            var _padding1: Float = 0.0
+            var _padding2: Float = 0.0
+            var _padding3: Float = 0.0
         }
 
         override init() {
@@ -91,6 +112,17 @@ struct PerspectiveMetalView: NSViewRepresentable {
 
             buildPipeline(device: device)
             buildSampler(device: device)
+        }
+
+        func startSettling() {
+            guard !isSettling else { return }
+            isSettling = true
+            settleStartTime = CACurrentMediaTime()
+            frozenAngle = smoothedAngle
+        }
+
+        func cancelSettling() {
+            isSettling = false
         }
 
         private func buildPipeline(device: MTLDevice) {
@@ -171,15 +203,38 @@ struct PerspectiveMetalView: NSViewRepresentable {
                   let texture = texture,
                   let blurredTexture = blurredTexture else { return }
 
+            var settleFactor: Float = 0.0
+            if isSettling {
+                let now = CACurrentMediaTime()
+                let elapsed = now - settleStartTime
+                let t = min(max(Float(elapsed / settleDuration), 0.0), 1.0)
+                // Smooth cubic ease-out: 1 - (1 - t)^3
+                settleFactor = 1.0 - pow(1.0 - t, 3.0)
+
+                if t >= 1.0 {
+                    isSettling = false
+                    settleFactor = 1.0
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onSettleCompleted?()
+                    }
+                }
+            }
+
             let targetAngle: Double
-            if let sensor = self.sensor {
+            if isSettling {
+                targetAngle = frozenAngle
+            } else if let sensor = self.sensor {
                 targetAngle = sensor.extrapolatedAngle(lookahead: self.lookahead)
             } else {
                 targetAngle = self.targetAngle
             }
 
-            let smoothingFactor = 0.25
-            self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
+            if isSettling {
+                self.smoothedAngle = frozenAngle
+            } else {
+                let smoothingFactor = 0.25
+                self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
+            }
             
             let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1))
             let angleRadians = Float(smoothedAngle * (.pi / 180.0))
@@ -188,7 +243,8 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 angle: angleRadians,
                 aspect: aspect,
                 keystoneStrength: self.keystoneStrength,
-                stretchBalance: self.stretchBalance
+                stretchBalance: self.stretchBalance,
+                settleProgress: settleFactor
             )
 
             encoder.setRenderPipelineState(pipelineState)

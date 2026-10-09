@@ -11,6 +11,10 @@ struct PerspectiveUniforms {
     float aspect;           // Screen aspect ratio (width / height)
     float keystoneStrength; // Horizontal taper intensity
     float stretchBalance;   // Aspect ratio compensator
+    float settleProgress;   // 0.0 = full perspective, 1.0 = completely flat & unwarped
+    float _padding1;
+    float _padding2;
+    float _padding3;
 };
 
 vertex RasterizerData vertex_main(uint vertexID [[vertex_id]]) {
@@ -37,11 +41,14 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float2 uv = in.texCoords;
 
     const float uprightRad = 1.5707963f; // 90° in radians
-    float currentTheta = min(uniforms.angle, uprightRad);
+    
+    // When settleProgress > 0, smoothly blend angle towards upright 90° (flat)
+    float targetAngle = mix(uniforms.angle, uprightRad, clamp(uniforms.settleProgress, 0.0f, 1.0f));
+    float currentTheta = min(targetAngle, uprightRad);
     float delta = uprightRad - currentTheta;
 
-    // Upright at 90° or wider: render flat and completely sharp edge-to-edge
-    if (delta <= 0.0001f) {
+    // Upright at 90° or wider, or settled: render flat and completely sharp edge-to-edge
+    if (delta <= 0.0001f || uniforms.settleProgress >= 0.999f) {
         return screenTexture.sample(textureSampler, uv);
     }
 
@@ -64,8 +71,6 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
         // Stretch balance drops smoothly below 45°
         lowAngleStretchMultiplier -= 1.4f * lowAngleProgress;
     }
-    
-
 
     // 1. Perspective Depth Coordinate Warping
     float effectiveKeystone = uniforms.keystoneStrength * transitionProgress * lowAngleKeystoneBoost;
@@ -80,7 +85,7 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     const float maxAngleRad = 90.0f * (3.14159265f / 180.0f); // ~90°
     
     // Normalized open progress (0.0 when nearly closed, 1.0 when upright)
-    float openProgress = clamp((uniforms.angle - minAngleRad) / (maxAngleRad - minAngleRad), 0.0f, 1.0f);
+    float openProgress = clamp((targetAngle - minAngleRad) / (maxAngleRad - minAngleRad), 0.0f, 1.0f);
     float smoothProgress = smoothstep(0.0f, 1.0f, openProgress);
 
     // The focus horizon sweeps upward from below the screen (-0.35) to above the top (4.0)
@@ -89,11 +94,12 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float sweepFactor = smoothstep(focusLine - feather, focusLine + feather, s);
     float gradientIntensity = mix(0.8f, 2.0f, s);
 
-    // Scale blur by transitionProgress so at 90° blur is strictly 0.0
-    float localBlur = clamp(sweepFactor * gradientIntensity * transitionProgress, 0.0f, 1.0f);
+    // Scale blur by transitionProgress and settleFactor so blur fades out during settle
+    float settleFactor = 1.0f - clamp(uniforms.settleProgress, 0.0f, 1.0f);
+    float localBlur = clamp(sweepFactor * gradientIntensity * transitionProgress * settleFactor, 0.0f, 1.0f);
 
     // 3. Dynamic Silhouette Edge Bleed
-    float edgeBleed = mix(0.003f, 0.040f, localBlur) * transitionProgress;
+    float edgeBleed = mix(0.003f, 0.040f, localBlur) * transitionProgress * settleFactor;
 
     // Cull pixels that fall entirely beyond the outward bloom area
     if (finalUV.x < -edgeBleed || finalUV.x > (1.0f + edgeBleed) ||
@@ -109,12 +115,12 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     // 5. Progressive Depth Shadow (Delayed to <= 70°)
     const float shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
     const float shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
-    float shadowActivation = smoothstep(shadowStartAngleRad, shadowFullAngleRad, uniforms.angle);
+    float shadowActivation = smoothstep(shadowStartAngleRad, shadowFullAngleRad, targetAngle);
 
     float maxShadowTop = 2.0f;
     float maxShadowBottom = 1.0f;
     float depthShadow = mix(maxShadowBottom, maxShadowTop, s);
-    float shadowAmount = clamp(sweepFactor * depthShadow * shadowActivation * transitionProgress, 0.0f, 1.0f);
+    float shadowAmount = clamp(sweepFactor * depthShadow * shadowActivation * transitionProgress * settleFactor, 0.0f, 1.0f);
     frameColor.rgb *= (1.0f - shadowAmount);
 
     // 6. Seamless Silhouette Edge Mask

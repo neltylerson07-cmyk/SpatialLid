@@ -109,7 +109,7 @@ struct ContentView: View {
             .cornerRadius(10)
 
             // Automatic Detection card
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 HStack {
                     Label("Automatic Perspective", systemImage: "bolt.badge.automatic.fill")
                         .font(.headline)
@@ -139,6 +139,22 @@ struct ContentView: View {
                             .foregroundStyle(.green)
                             .cornerRadius(4)
                     }
+                }
+
+                Divider()
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auto-Return Below 90°")
+                            .font(.subheadline)
+                        Text("Unwarps to desktop when lid stops moving for 1s")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $autoManager.isAutoSettleEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
                 }
             }
             .padding()
@@ -196,7 +212,8 @@ struct ContentView: View {
 
             // Instructions footer
             VStack(alignment: .leading, spacing: 4) {
-                Label("Closing lid (<90°) automatically captures screen and warps", systemImage: "sparkles")
+                Label("Closing lid (<90°) captures screen and warps in real time", systemImage: "sparkles")
+                Label("Stopping movement (<90°) unwarps and returns to usable desktop after 1s", systemImage: "arrow.triangle.2.circlepath")
                 Label("Open lid past 90° or press ESC to exit", systemImage: "info.circle")
                 Label("Toggle 'Tune Parameters' (H) in overlay to adjust keystone", systemImage: "slider.horizontal.3")
             }
