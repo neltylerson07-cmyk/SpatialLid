@@ -74,12 +74,75 @@ struct MenuBarMenuView: View {
 
             Toggle("Automatic Perspective (<90°)", isOn: $autoManager.isAutoModeEnabled)
             Toggle("Auto-Settle Below 90°", isOn: $autoManager.isAutoSettleEnabled)
+            Toggle("Perspective Clock (Auto-Settle Off)", isOn: $autoManager.isClockModeEnabled)
+                .disabled(autoManager.isAutoSettleEnabled)
+
+            if autoManager.isClockModeEnabled {
+                Menu("Clock Position") {
+                    Section("Top") {
+                        ForEach([ClockPosition.topLeading, .top, .topTrailing]) { pos in
+                            Button {
+                                overlayController.viewState.clockPosition = pos
+                            } label: {
+                                if overlayController.viewState.clockPosition == pos {
+                                    Label(pos.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(pos.rawValue)
+                                }
+                            }
+                        }
+                    }
+                    Section("Center") {
+                        ForEach([ClockPosition.leading, .center, .trailing]) { pos in
+                            Button {
+                                overlayController.viewState.clockPosition = pos
+                            } label: {
+                                if overlayController.viewState.clockPosition == pos {
+                                    Label(pos.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(pos.rawValue)
+                                }
+                            }
+                        }
+                    }
+                    Section("Bottom") {
+                        ForEach([ClockPosition.bottomLeading, .bottom, .bottomTrailing]) { pos in
+                            Button {
+                                overlayController.viewState.clockPosition = pos
+                            } label: {
+                                if overlayController.viewState.clockPosition == pos {
+                                    Label(pos.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(pos.rawValue)
+                                }
+                            }
+                        }
+                    }
+                }
+                .disabled(autoManager.isAutoSettleEnabled)
+
+                Menu("Clock Size") {
+                    ForEach(ClockSize.allCases) { size in
+                        Button {
+                            overlayController.viewState.clockSize = size
+                        } label: {
+                            if overlayController.viewState.clockSize == size {
+                                Label(size.rawValue, systemImage: "checkmark")
+                            } else {
+                                Text(size.rawValue)
+                            }
+                        }
+                    }
+                }
+                .disabled(autoManager.isAutoSettleEnabled)
+
+                Toggle("StandBy Calendar & Clock Style", isOn: overlayController.standByStyleBinding)
+                    .disabled(autoManager.isAutoSettleEnabled)
+            }
+
+            Toggle("External Monitor Ambient Effect", isOn: $autoManager.isExternalDisplayEnabled)
+            Toggle("Frosted Glass Effect", isOn: overlayController.frostedGlassBinding)
             Toggle("Simulated Keyboard Reflection", isOn: overlayController.keyboardReflectionBinding)
-
-            Divider()
-
-            Toggle("Automatic Perspective (<90°)", isOn: $autoManager.isAutoModeEnabled)
-            Toggle("Auto-Settle Below 90°", isOn: $autoManager.isAutoSettleEnabled)
 
             Divider()
 
@@ -175,28 +238,219 @@ struct ContentView: View {
             .cornerRadius(10)
 
             // Automation Settings
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle("Enable Automatic Perspective", isOn: $autoManager.isAutoModeEnabled)
-                    .font(.body.weight(.medium))
+            VStack(spacing: 12) {
+                Toggle(isOn: $autoManager.isAutoModeEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Enable Automatic Perspective")
+                            .font(.body.weight(.medium))
+                        Text("Automatically takes a screenshot and engages perspective view when the lid passes below 90°.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
-                Text("Automatically takes a screenshot and engages perspective view when the lid passes below 90°.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Divider()
 
-                Toggle("Auto-Return to Usable Desktop", isOn: $autoManager.isAutoSettleEnabled)
-                    .font(.body.weight(.medium))
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Auto-Return to Usable Desktop")
+                                .font(.body.weight(.medium))
+                            Text(autoManager.isAutoSettleEnabled && autoManager.autoSettleDelay > 0
+                                ? "When the lid is paused below 90° for >\(autoManager.formattedDelay), smoothly unwarps and fades out back to the interactive desktop."
+                                : "Auto-return disabled. Perspective view remains active until lid is opened past 90° or ESC is pressed.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(autoManager.isAutoSettleEnabled && autoManager.autoSettleDelay > 0
+                            ? String(format: "%.1f s", autoManager.autoSettleDelay)
+                            : "Off")
+                            .font(.callout.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(autoManager.isAutoSettleEnabled && autoManager.autoSettleDelay > 0 ? .primary : .secondary)
+                    }
 
-                Text("When the lid is paused below 90° for >1 second, smoothly unwarps and fades out back to the interactive desktop.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: {
+                                autoManager.isAutoSettleEnabled ? autoManager.autoSettleDelay : 0.0
+                            },
+                            set: { newValue in
+                                let currentVal = autoManager.isAutoSettleEnabled ? autoManager.autoSettleDelay : 0.0
+                                let stepVal = (newValue * 2.0).rounded() / 2.0
+                                if abs(currentVal - stepVal) > 0.05 {
+                                    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                                }
+                                if stepVal <= 0 {
+                                    autoManager.autoSettleDelay = 0
+                                    autoManager.isAutoSettleEnabled = false
+                                } else {
+                                    autoManager.autoSettleDelay = min(3.0, stepVal)
+                                    autoManager.isAutoSettleEnabled = true
+                                }
+                            }
+                        ),
+                        in: 0...3,
+                        step: 0.5,
+                        label: {
+                            Text("Auto-Return Delay")
+                        },
+                        minimumValueLabel: {
+                            Text("Off (0s)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        },
+                        maximumValueLabel: {
+                            Text("3s")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        },
+                        tick: { val in
+                            SliderTick(val) {
+                                if val == 0 {
+                                    Text("Off")
+                                } else if val == 1.0 {
+                                    Text("1s")
+                                } else if val == 2.0 {
+                                    Text("2s")
+                                } else if val == 3.0 {
+                                    Text("3s")
+                                }
+                            }
+                        }
+                    )
+                    .sensoryFeedback(.levelChange, trigger: autoManager.autoSettleDelay)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                Toggle("Simulated Keyboard Reflection", isOn: overlayController.keyboardReflectionBinding)
-                    .font(.body.weight(.medium))
+                Divider()
 
-                Text("Simulates specular laptop keyboard reflection on the screen glass between 45° and 90°.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // Perspective Clock Mode (Engaged when Auto-Return is Off)
+                Toggle(isOn: $autoManager.isClockModeEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("Perspective Clock Mode")
+                                .font(.body.weight(.medium))
+                            if autoManager.isAutoSettleEnabled {
+                                Text("(Active when Auto-Return is Off)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        Text("When Auto-Return is off, dims the desktop and projects a 3D perspective digital clock after 3 seconds of the lid remaining stationary.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .disabled(autoManager.isAutoSettleEnabled)
+
+                if autoManager.isClockModeEnabled {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Position")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Picker("", selection: overlayController.clockPositionBinding) {
+                                Section("Top") {
+                                    Text("Top Left").tag(ClockPosition.topLeading)
+                                    Text("Top").tag(ClockPosition.top)
+                                    Text("Top Right").tag(ClockPosition.topTrailing)
+                                }
+                                Section("Center") {
+                                    Text("Center Left").tag(ClockPosition.leading)
+                                    Text("Center").tag(ClockPosition.center)
+                                    Text("Center Right").tag(ClockPosition.trailing)
+                                }
+                                Section("Bottom") {
+                                    Text("Bottom Left").tag(ClockPosition.bottomLeading)
+                                    Text("Bottom").tag(ClockPosition.bottom)
+                                    Text("Bottom Right").tag(ClockPosition.bottomTrailing)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .frame(width: 150)
+                        }
+
+                        HStack {
+                            Text("Size")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Picker("", selection: overlayController.clockSizeBinding) {
+                                ForEach(ClockSize.allCases) { size in
+                                    Text(size.rawValue).tag(size)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 230)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("StandBy Calendar & Clock Style")
+                                    .font(.subheadline.weight(.medium))
+                                Text("Replaces the single digital clock with the Apple StandBy dual layout: day/month and monthly calendar on the left, and a squircle analog clock on the right.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Toggle("", isOn: overlayController.standByStyleBinding)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                        }
+                    }
+                    .padding(.leading, 18)
+                    .padding(.vertical, 4)
+                    .disabled(autoManager.isAutoSettleEnabled)
+                }
+
+                Divider()
+
+                Toggle(isOn: overlayController.frostedGlassBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Frosted Glass Effect")
+                            .font(.body.weight(.medium))
+                        Text("Simulates an acid-etched frosted glass pane with a visible tactile grain pattern, micro-facet refraction, and Fresnel sheen.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Divider()
+
+                Toggle(isOn: overlayController.keyboardReflectionBinding) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Simulated Keyboard Reflection")
+                            .font(.body.weight(.medium))
+                        Text("Simulates specular laptop keyboard reflection on the screen glass between 45° and 90°.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Divider()
+
+                Toggle(isOn: $autoManager.isExternalDisplayEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("External Display Ambient Animation")
+                            .font(.body.weight(.medium))
+                        Text("Simultaneously zooms out, progressively blurs, and darkens connected external displays (no perspective distortion). Always auto-settles so your main/external workspace remains usable.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
+            .toggleStyle(.switch)
             .padding()
             .background(.quaternary.opacity(0.4))
             .cornerRadius(10)
@@ -243,9 +497,16 @@ struct ContentView: View {
             // Instructions footer
             VStack(alignment: .leading, spacing: 4) {
                 Label("Closing lid (<90°) captures screen and warps in real time", systemImage: "sparkles")
-                Label("When lid is tilted, press 'C' for Calibrator or 'K' to toggle Keyboard", systemImage: "slider.horizontal.2.square.badge.arrow.down")
+                Label("When lid is tilted, press 'C' for Calibrator, 'T' for Clock, 'F' for Frosted, or 'K' for Keyboard", systemImage: "slider.horizontal.2.square.badge.arrow.down")
                 Label("Use [↑/↓] and [←/→] to navigate and tune perspective parameters", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
-                Label("Stopping movement (<90°) unwarps and returns to desktop after 1s", systemImage: "arrow.triangle.2.circlepath")
+                if autoManager.isAutoSettleEnabled && autoManager.autoSettleDelay > 0 {
+                    Label("Stopping movement (<90°) unwarps and returns to desktop after \(autoManager.formattedDelay)", systemImage: "arrow.triangle.2.circlepath")
+                } else if autoManager.isClockModeEnabled {
+                    Label("Stopping movement (<90°) dims desktop and shows perspective clock after 3s", systemImage: "clock")
+                } else {
+                    Label("Stopping movement (<90°) keeps perspective active (auto-return off)", systemImage: "arrow.triangle.2.circlepath")
+                }
+                Label("External displays always auto-settle to keep your workspace usable", systemImage: "display.2")
                 Label("Open lid past 90° or press ESC to exit", systemImage: "info.circle")
             }
             .font(.caption)
@@ -291,12 +552,28 @@ struct ContentView: View {
             if handleKeyPress("c") { return .handled }
             return .ignored
         }
+        .onKeyPress(KeyEquivalent("f")) {
+            if handleKeyPress("f") { return .handled }
+            return .ignored
+        }
+        .onKeyPress(KeyEquivalent("F")) {
+            if handleKeyPress("f") { return .handled }
+            return .ignored
+        }
         .onKeyPress(KeyEquivalent("k")) {
             if handleKeyPress("k") { return .handled }
             return .ignored
         }
         .onKeyPress(KeyEquivalent("K")) {
             if handleKeyPress("k") { return .handled }
+            return .ignored
+        }
+        .onKeyPress(KeyEquivalent("t")) {
+            if handleKeyPress("t") { return .handled }
+            return .ignored
+        }
+        .onKeyPress(KeyEquivalent("T")) {
+            if handleKeyPress("t") { return .handled }
             return .ignored
         }
     }
@@ -317,6 +594,22 @@ struct ContentView: View {
                     }
                     return nil
                 }
+            } else if char == "t" {
+                if overlayController.isShowing {
+                    if overlayController.viewState.isClockActive {
+                        overlayController.deactivateClockMode()
+                    } else {
+                        overlayController.viewState.currentLidAngle = sensor.displayAngle
+                        overlayController.activateClockMode()
+                    }
+                    return nil
+                }
+            } else if char == "f" {
+                overlayController.viewState.isFrostedGlassEnabled.toggle()
+                if overlayController.viewState.showCalibrator {
+                    overlayController.viewState.requestRender()
+                }
+                return nil
             } else if char == "k" {
                 overlayController.viewState.isKeyboardReflectionEnabled.toggle()
                 if overlayController.viewState.showCalibrator {
@@ -341,6 +634,22 @@ struct ContentView: View {
                 }
                 return true
             }
+        } else if key.lowercased() == "t" {
+            if overlayController.isShowing {
+                if overlayController.viewState.isClockActive {
+                    overlayController.deactivateClockMode()
+                } else {
+                    overlayController.viewState.currentLidAngle = sensor.displayAngle
+                    overlayController.activateClockMode()
+                }
+                return true
+            }
+        } else if key.lowercased() == "f" {
+            overlayController.viewState.isFrostedGlassEnabled.toggle()
+            if overlayController.viewState.showCalibrator {
+                overlayController.viewState.requestRender()
+            }
+            return true
         } else if key.lowercased() == "k" {
             overlayController.viewState.isKeyboardReflectionEnabled.toggle()
             if overlayController.viewState.showCalibrator {

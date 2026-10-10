@@ -7,11 +7,14 @@ struct PerspectiveMetalView: NSViewRepresentable {
     var snapshot: CGImage?
     var calibratorImage: CGImage? = nil
     var showCalibrator: Bool = false
+    var clockImage: CGImage? = nil
+    var isClockActive: Bool = false
     var sensor: LidSensor? = nil
     var fallbackAngle: Double = 90.0
     var lookahead: Double = 0.22
     var keystoneStrength: Float
     var stretchBalance: Float
+    var lowAngleCompensation: Float = 1.00
     var keyboardReflection: Float = 0.44
     var keyboardTilt: Float = 0.40
     var keyboardReach: Float = 0.38
@@ -19,6 +22,9 @@ struct PerspectiveMetalView: NSViewRepresentable {
     var keyboardOffset: Float = -0.01
     var keyboardWidth: Float = 0.88
     var keyboardDepthBlur: Float = 0.30
+    var frostedGlass: Float = 0.10
+    var blurIntensity: Float = 1.00
+    var shadowIntensity: Float = 1.00
     var isSettling: Bool = false
     var onSettleCompleted: (() -> Void)? = nil
     var onFirstFrame: (() -> Void)? = nil
@@ -55,6 +61,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         context.coordinator.lookahead = lookahead
         context.coordinator.onSettleCompleted = onSettleCompleted
         context.coordinator.showCalibrator = showCalibrator
+        context.coordinator.isClockActive = isClockActive
 
         if isSettling && !context.coordinator.isSettling {
             context.coordinator.startSettling()
@@ -65,6 +72,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         context.coordinator.updateParameters(
             snapshot: snapshot,
             calibratorImage: calibratorImage,
+            clockImage: clockImage,
             targetAngle: fallbackAngle,
             keystone: keystoneStrength,
             balance: stretchBalance,
@@ -74,7 +82,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
             keyboardBacklight: keyboardBacklight,
             keyboardOffset: keyboardOffset,
             keyboardWidth: keyboardWidth,
-            keyboardDepthBlur: keyboardDepthBlur
+            keyboardDepthBlur: keyboardDepthBlur,
+            frostedGlass: frostedGlass,
+            blurIntensity: blurIntensity,
+            shadowIntensity: shadowIntensity,
+            lowAngleCompensation: lowAngleCompensation
         )
     }
 
@@ -100,7 +112,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
         // Track last loaded snapshot to prevent re-uploading every frame
         private var lastLoadedSnapshotID: CGImage?
         private var lastLoadedCalibratorID: CGImage?
+        private var lastLoadedClockID: CGImage?
         var showCalibrator: Bool = false
+        var isClockActive: Bool = false
+        private var clockProgress: Float = 0.0
+        private var lastFrameTime: CFTimeInterval = 0.0
+        private var clockTexture: MTLTexture?
+        private var defaultClockTexture: MTLTexture?
 
         // Smooth interpolation state
         private var targetAngle: Double = 90.0
@@ -114,6 +132,10 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var keyboardOffset: Float = -0.01
         private var keyboardWidth: Float = 0.88
         private var keyboardDepthBlur: Float = 0.30
+        private var frostedGlass: Float = 0.10
+        private var blurIntensity: Float = 1.00
+        private var shadowIntensity: Float = 1.00
+        private var lowAngleCompensation: Float = 1.00
 
         // Tween / Settle to full screen
         private(set) var isSettling: Bool = false
@@ -136,6 +158,13 @@ struct PerspectiveMetalView: NSViewRepresentable {
             var keyboardWidth: Float = 0.88
             var keyboardDepthBlur: Float = 0.30
             var showCalibrator: Float = 0.0
+            var frostedGlass: Float = 0.65
+            var blurIntensity: Float = 1.00
+            var shadowIntensity: Float = 1.00
+            var lowAngleCompensation: Float = 1.00
+            var clockProgress: Float = 0.0
+            var showClock: Float = 0.0
+            var pad0: Float = 0.0
         }
 
         override init() {
@@ -147,6 +176,22 @@ struct PerspectiveMetalView: NSViewRepresentable {
             buildPipeline(device: device)
             buildSampler(device: device)
             buildDefaultCalibratorTexture(device: device)
+            buildDefaultClockTexture(device: device)
+        }
+
+        private func buildDefaultClockTexture(device: MTLDevice) {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: 1,
+                height: 1,
+                mipmapped: false
+            )
+            desc.usage = [.shaderRead]
+            if let dummy = device.makeTexture(descriptor: desc) {
+                var zero: UInt32 = 0
+                dummy.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 4)
+                self.defaultClockTexture = dummy
+            }
         }
 
         private func buildDefaultCalibratorTexture(device: MTLDevice) {
@@ -200,6 +245,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         func updateParameters(
             snapshot: CGImage?,
             calibratorImage: CGImage?,
+            clockImage: CGImage? = nil,
             targetAngle: Double,
             keystone: Float,
             balance: Float,
@@ -209,7 +255,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
             keyboardBacklight: Float,
             keyboardOffset: Float,
             keyboardWidth: Float,
-            keyboardDepthBlur: Float
+            keyboardDepthBlur: Float,
+            frostedGlass: Float,
+            blurIntensity: Float,
+            shadowIntensity: Float,
+            lowAngleCompensation: Float
         ) {
             self.targetAngle = targetAngle
             self.keystoneStrength = keystone
@@ -221,6 +271,10 @@ struct PerspectiveMetalView: NSViewRepresentable {
             self.keyboardOffset = keyboardOffset
             self.keyboardWidth = keyboardWidth
             self.keyboardDepthBlur = keyboardDepthBlur
+            self.frostedGlass = frostedGlass
+            self.blurIntensity = blurIntensity
+            self.shadowIntensity = shadowIntensity
+            self.lowAngleCompensation = lowAngleCompensation
 
             if let snapshot = snapshot, snapshot !== lastLoadedSnapshotID, let device = self.device {
                 self.lastLoadedSnapshotID = snapshot
@@ -241,6 +295,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
             if let calibImage = calibratorImage, calibImage !== lastLoadedCalibratorID, let device = self.device {
                 self.lastLoadedCalibratorID = calibImage
                 self.calibratorTexture = makeTexture(from: calibImage, device: device)
+            }
+
+            if let clkImage = clockImage, clkImage !== lastLoadedClockID, let device = self.device {
+                self.lastLoadedClockID = clkImage
+                self.clockTexture = makeTexture(from: clkImage, device: device)
             }
         }
 
@@ -363,6 +422,21 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
             }
             
+            // Clock transition progress animation
+            let now = CACurrentMediaTime()
+            let dt = lastFrameTime > 0 ? Float(min(now - lastFrameTime, 0.1)) : 0.016
+            lastFrameTime = now
+
+            if isClockActive {
+                if clockProgress < 1.0 {
+                    clockProgress = min(clockProgress + dt / 0.45, 1.0)
+                }
+            } else {
+                if clockProgress > 0.0 {
+                    clockProgress = max(clockProgress - dt / 0.25, 0.0)
+                }
+            }
+
             let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1))
             let angleRadians = Float(smoothedAngle * (.pi / 180.0))
 
@@ -379,7 +453,14 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 keyboardOffset: self.keyboardOffset,
                 keyboardWidth: self.keyboardWidth,
                 keyboardDepthBlur: self.keyboardDepthBlur,
-                showCalibrator: (self.showCalibrator && self.calibratorTexture != nil) ? 1.0 : 0.0
+                showCalibrator: (self.showCalibrator && self.calibratorTexture != nil) ? 1.0 : 0.0,
+                frostedGlass: self.frostedGlass,
+                blurIntensity: self.blurIntensity,
+                shadowIntensity: self.shadowIntensity,
+                lowAngleCompensation: self.lowAngleCompensation,
+                clockProgress: self.clockProgress,
+                showClock: (self.clockTexture != nil && self.clockProgress > 0.001) ? 1.0 : 0.0,
+                pad0: 0.0
             )
 
             encoder.setRenderPipelineState(pipelineState)
@@ -388,6 +469,8 @@ struct PerspectiveMetalView: NSViewRepresentable {
             encoder.setFragmentTexture(blurredTexture, index: 1)
             let calibTex = (self.showCalibrator ? self.calibratorTexture : nil) ?? self.defaultCalibratorTexture
             encoder.setFragmentTexture(calibTex, index: 2)
+            let clkTex = (self.clockProgress > 0.001 ? self.clockTexture : nil) ?? self.defaultClockTexture
+            encoder.setFragmentTexture(clkTex, index: 3)
             encoder.setFragmentSamplerState(textureSampler, index: 0)
 
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)

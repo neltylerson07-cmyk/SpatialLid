@@ -20,6 +20,13 @@ struct PerspectiveUniforms {
     float keyboardWidth;      // Width of the keyboard well (0.60 to 1.00, default 0.94)
     float keyboardDepthBlur;  // Optical depth-of-field blur gradient between closest & furthest row (default 1.0)
     float showCalibrator;     // 1.0 if calibrator is active, 0.0 otherwise
+    float frostedGlass;       // Frosted glass intensity (0.0 to 1.0, default 0.10)
+    float blurIntensity;      // Screen depth blur intensity (0.0 to 2.0, default 1.00)
+    float shadowIntensity;    // Screen depth shadow intensity (0.0 to 2.0, default 1.00)
+    float lowAngleCompensation; // Low-angle taper & stretch compensation intensity (0.0 to 2.0, default 1.00)
+    float clockProgress;      // Smooth transition progress for clock mode & background dimming (0.0 to 1.0)
+    float showClock;          // 1.0 if clock texture is active, 0.0 otherwise
+    float pad0;               // 16-byte alignment padding
 };
 
 vertex RasterizerData vertex_main(uint vertexID [[vertex_id]]) {
@@ -455,10 +462,73 @@ static float4 sampleKeyboardReflection(float2 finalUV,
     return float4(col, alpha);
 }
 
+// MARK: - Frosted Glass Grain Pattern Synthesizer
+struct FrostedGrainResult {
+    float height;        // Surface relief height (0.0 to 1.0)
+    float2 gradient;     // Surface normal perturbation (for light reflection & refraction)
+    float microSparkle;  // High-frequency silica / crystalline glint
+};
+
+static FrostedGrainResult sampleFrostedGlassGrain(float2 uv, float aspect) {
+    FrostedGrainResult result;
+
+    // Isotropic coordinates so grain pattern has uniform physical aspect on screen
+    // Scale 180 means ~180 grain clusters vertically, giving tactile ~8-14 pixel cellular grain on screen
+    float2 p = uv * float2(aspect * 360.0f / 1.5, 360.0f / 1.5);
+    float2 ip = floor(p);
+    float2 fp = fract(p);
+
+    float minDist = 10.0f;
+    float2 bestDiff = float2(0.0f);
+
+    // 3x3 Worley / cellular search to generate distinct acid-etched glass pits and grain boundaries
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float2 g = float2(float(x), float(y));
+            // Stable pseudorandom facet center
+            float2 cellCoord = ip + g;
+            float3 p3 = fract(float3(cellCoord.xyx) * float3(0.1031f, 0.1030f, 0.0973f));
+            p3 += dot(p3, p3.yzx + 33.33f);
+            float2 jitter = fract((p3.xx + p3.yz) * p3.zy);
+
+            float2 diff = g + jitter - fp;
+            float d = length(diff);
+            if (d < minDist) {
+                minDist = d;
+                bestDiff = diff;
+            }
+        }
+    }
+
+    // Cell facet profile: distinct concave pit with raised rounded grain borders
+    float cellFacet = 1.0f - clamp(minDist, 0.0f, 1.0f);
+    // Analytical gradient of distance field for refraction & lighting normals
+    float2 cellGrad = -bestDiff / max(minDist, 0.001f);
+
+    // Secondary medium grain layer (rotated and offset for natural organic variation)
+    float2 pMed = uv * float2(aspect * 760.0f / 1.5, 760.0f / 1.5);
+    float2 ipMed = floor(pMed);
+    float2 fpMed = fract(pMed);
+    float medHash = fract(sin(dot(ipMed, float2(127.1f, 311.7f))) * 43758.5453f);
+    float medGrain = medHash * (1.0f - length(fpMed - 0.5f) * 1.4f);
+
+    // Tertiary high-frequency crystal sparkle (sandblasted quartz glitter)
+    float2 pSparkle = uv * float2(aspect * 1900.0f / 1.5, 1900.0f / 1.5);
+    float sparkle = fract(sin(dot(pSparkle, float2(269.5f, 183.3f))) * 43758.5453f);
+
+    // Composite height and analytical gradient
+    result.height = clamp(cellFacet * 0.70f + medGrain * 0.30f, 0.0f, 1.0f);
+    result.gradient = cellGrad;
+    result.microSparkle = sparkle;
+
+    return result;
+}
+
 fragment float4 fragment_main(RasterizerData in [[stage_in]],
                               texture2d<float> screenTexture [[texture(0)]],
                               texture2d<float> blurredTexture [[texture(1)]],
                               texture2d<float> calibratorTexture [[texture(2)]],
+                              texture2d<float> clockTexture [[texture(3)]],
                               sampler textureSampler [[sampler(0)]],
                               constant PerspectiveUniforms &uniforms [[buffer(0)]]) {
     float2 uv = in.texCoords;
@@ -478,6 +548,42 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
             float4 calib = calibratorTexture.sample(textureSampler, uv);
             base.rgb = base.rgb * (1.0f - calib.a) + calib.rgb;
         }
+        if (uniforms.showClock > 0.5f && uniforms.clockProgress > 0.001f) {
+            float dimFactor = mix(1.0f, 0.52f, uniforms.clockProgress);
+            base.rgb *= dimFactor;
+            float4 clockPixel = clockTexture.sample(textureSampler, uv);
+            if (clockPixel.a > 0.01f) {
+                float2 texStep = float2(1.0f / max(float(clockTexture.get_width()), 1.0f),
+                                        1.0f / max(float(clockTexture.get_height()), 1.0f));
+                float aL = clockTexture.sample(textureSampler, uv - float2(texStep.x * 2.5f, 0.0f)).a;
+                float aR = clockTexture.sample(textureSampler, uv + float2(texStep.x * 2.5f, 0.0f)).a;
+                float aT = clockTexture.sample(textureSampler, uv - float2(0.0f, texStep.y * 2.5f)).a;
+                float aB = clockTexture.sample(textureSampler, uv + float2(0.0f, texStep.y * 2.5f)).a;
+                float2 glassNormal2D = float2(aR - aL, aB - aT);
+
+                // Optical liquid glass refraction
+                float2 refractOffset = glassNormal2D * 0.020f;
+                float2 refractUV = clamp(uv - refractOffset, 0.0f, 1.0f);
+                float4 refSharp = screenTexture.sample(textureSampler, refractUV);
+                float4 refBlur = blurredTexture.sample(textureSampler, refractUV);
+                float3 glassBg = mix(refSharp.rgb, refBlur.rgb, 0.30f);
+
+                // Subtle chromatic dispersion
+                glassBg.r = mix(glassBg.r, screenTexture.sample(textureSampler, clamp(refractUV - glassNormal2D * 0.003f, 0.0f, 1.0f)).r, 0.35f);
+                glassBg.b = mix(glassBg.b, screenTexture.sample(textureSampler, clamp(refractUV + glassNormal2D * 0.003f, 0.0f, 1.0f)).b, 0.35f);
+
+                // Specular meniscus highlight
+                float rimGrad = length(glassNormal2D);
+                float3 N = normalize(float3(-glassNormal2D * 1.8f, 1.0f));
+                float3 L = normalize(float3(0.0f, -0.7f, 0.7f));
+                float spec = pow(max(dot(N, L), 0.0f), 10.0f) * 0.28f;
+                float rim = smoothstep(0.12f, 0.65f, rimGrad) * 0.22f;
+
+                float3 liquidGlassColor = mix(glassBg, clockPixel.rgb, 0.62f) + float3(spec + rim);
+                float clockAlpha = clockPixel.a * uniforms.clockProgress;
+                base.rgb = mix(base.rgb, liquidGlassColor, clockAlpha);
+            }
+        }
         return base;
     }
 
@@ -495,19 +601,41 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float lowAngleStretchMultiplier = 1.0f;
     if (currentTheta < angle45Rad) {
         float lowAngleProgress = clamp((angle45Rad - currentTheta) / angle45Rad, 0.0f, 1.0f);
+        float compFactor = clamp(uniforms.lowAngleCompensation, 0.0f, 2.0f);
         // Keystone taper ramps up smoothly below 45°
-        lowAngleKeystoneBoost += 1.0f * (0.8f * lowAngleProgress + 0.6f * lowAngleProgress * lowAngleProgress);
+        lowAngleKeystoneBoost += compFactor * (0.8f * lowAngleProgress + 0.6f * lowAngleProgress * lowAngleProgress);
         // Stretch balance drops smoothly below 45°
-        lowAngleStretchMultiplier -= 1.8f * lowAngleProgress;
+        lowAngleStretchMultiplier -= (1.8f * compFactor) * lowAngleProgress;
     }
+
+    // Scale effects by transitionProgress and settleFactor
+    float settleFactor = 1.0f - clamp(uniforms.settleProgress, 0.0f, 1.0f);
+
+    // Frosted glass intensity
+    float frostAmount = clamp(uniforms.frostedGlass, 0.0f, 1.0f) * transitionProgress * settleFactor;
+
+    // Evaluate frosted grain directly ON THE SCREEN (in screen space uv, NOT projected)
+    FrostedGrainResult screenGrain;
+    float2 grainRefract = float2(0.0f);
+    if (frostAmount > 0.001f) {
+        screenGrain = sampleFrostedGlassGrain(uv, uniforms.aspect);
+        grainRefract = screenGrain.gradient * (0.0055f * frostAmount);
+    }
+
+    // Physical screen glass refracts incoming light rays before perspective projection
+    float2 effectiveScreenUV = uv + grainRefract;
 
     // 1. Perspective Depth Coordinate Warping
     float effectiveKeystone = uniforms.keystoneStrength * transitionProgress * lowAngleKeystoneBoost;
     float effectiveStretch = max(uniforms.stretchBalance * lowAngleStretchMultiplier, 0.01f);
     float w = max(1.0f - (s * tiltAmount * effectiveKeystone), 0.05f);
-    float warpedX = ((uv.x - 0.5f) / w) + 0.5f;
+    float warpedX = ((effectiveScreenUV.x - 0.5f) / w) + 0.5f;
     float warpedY = 1.0f - (s * (1.0f - (tiltAmount * (1.0f - effectiveStretch))) / w);
     float2 finalUV = float2(warpedX, warpedY);
+
+    // Clean perspective projection coordinates (without grain refraction) for UI elements like Calibrator
+    float cleanWarpedX = ((uv.x - 0.5f) / w) + 0.5f;
+    float2 cleanPerspectiveUV = float2(cleanWarpedX, warpedY);
 
     // 2. Traveling Focus Wavefront Math
     const float minAngleRad = 60.0f * (3.14159265f / 180.0f); // ~60°
@@ -523,61 +651,244 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float sweepFactor = smoothstep(focusLine - feather, focusLine + feather, s);
     float gradientIntensity = mix(0.8f, 2.0f, s);
 
-    // Scale blur by transitionProgress and settleFactor so blur fades out during settle
-    float settleFactor = 1.0f - clamp(uniforms.settleProgress, 0.0f, 1.0f);
-    float localBlur = clamp(sweepFactor * gradientIntensity * transitionProgress * settleFactor, 0.0f, 1.0f);
+    // Scale blur by transitionProgress, settleFactor, and blurIntensity
+    float localBlur = clamp(sweepFactor * gradientIntensity * transitionProgress * settleFactor * uniforms.blurIntensity, 0.0f, 1.0f);
 
     // 3. Dynamic Silhouette Edge Bleed
     float edgeBleed = mix(0.003f, 0.040f, localBlur) * transitionProgress * settleFactor;
 
-    // Cull pixels that fall entirely beyond the outward bloom area
-    if (finalUV.x < -edgeBleed || finalUV.x > (1.0f + edgeBleed) ||
-        finalUV.y < -edgeBleed || finalUV.y > (1.0f + edgeBleed)) {
-        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    // Determine if pixel is inside the tilted screen quad
+    bool isInside = (finalUV.x >= -edgeBleed && finalUV.x <= (1.0f + edgeBleed) &&
+                     finalUV.y >= -edgeBleed && finalUV.y <= (1.0f + edgeBleed));
+
+    float4 frameColor = float4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    if (isInside) {
+        // 4. Sample and Blend Content with Frosted Glass Optical Model
+        float4 sharpColor = screenTexture.sample(textureSampler, clamp(finalUV, 0.0f, 1.0f));
+
+        if (frostAmount > 0.001f) {
+            // Chromatic dispersion through screen-space grain facets
+            float2 dispOffset = float2(0.0022f, 0.0012f) * frostAmount;
+            float r = blurredTexture.sample(textureSampler, clamp(finalUV + dispOffset, 0.0f, 1.0f)).r;
+            float g = blurredTexture.sample(textureSampler, clamp(finalUV, 0.0f, 1.0f)).g;
+            float b = blurredTexture.sample(textureSampler, clamp(finalUV - dispOffset, 0.0f, 1.0f)).b;
+            float4 dispersedBlurred = float4(r, g, b, 1.0f);
+
+            float baseFrost = mix(0.40f, 0.88f, s) * frostAmount;
+            float effectiveBlur = clamp(max(localBlur, baseFrost * uniforms.blurIntensity), 0.0f, 1.0f);
+            frameColor = mix(sharpColor, dispersedBlurred, effectiveBlur);
+        } else {
+            float4 blurredColor = blurredTexture.sample(textureSampler, clamp(finalUV, 0.0f, 1.0f));
+            frameColor = mix(sharpColor, blurredColor, localBlur);
+        }
+
+        // 5. Progressive Depth Shadow (Delayed to <= 70°)
+        const float shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
+        const float shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
+        float shadowActivation = smoothstep(shadowStartAngleRad, shadowFullAngleRad, targetAngle);
+
+        float maxShadowTop = 2.0f;
+        float maxShadowBottom = 1.0f;
+        float depthShadow = mix(maxShadowBottom, maxShadowTop, s);
+        float shadowAmount = clamp(sweepFactor * depthShadow * shadowActivation * transitionProgress * settleFactor * uniforms.shadowIntensity, 0.0f, 1.0f);
+        frameColor.rgb *= (1.0f - shadowAmount);
+
+        // 6. Simulated Keyboard Reflection (Active exclusively between 45° and 90°)
+        if (uniforms.keyboardReflection > 0.001f && delta > 0.0001f && uniforms.settleProgress < 0.999f && currentTheta > minReflectAngleRad) {
+            float4 kbReflect = sampleKeyboardReflection(finalUV, delta, currentTheta, uniforms, blurredTexture, textureSampler);
+            float refAlpha = clamp(kbReflect.a * uniforms.keyboardReflection, 0.0f, 0.85f);
+            frameColor.rgb = frameColor.rgb * (1.0f - 0.25f * refAlpha) + kbReflect.rgb * refAlpha;
+        }
+
+        // 7. Seamless Silhouette Edge Mask
+        float distLeft   = max(-finalUV.x, 0.0f);
+        float distRight  = max(finalUV.x - 1.0f, 0.0f);
+        float distTop    = max(-finalUV.y, 0.0f);
+        float outsideDist = max(max(distLeft, distRight), distTop);
+        float borderMask = (edgeBleed > 0.0001f) ? (1.0f - smoothstep(0.0f, edgeBleed, outsideDist)) : (outsideDist <= 0.0f ? 1.0f : 0.0f);
+        frameColor.rgb *= borderMask;
     }
 
-    // 4. Sample and Blend Content
-    float4 sharpColor = screenTexture.sample(textureSampler, clamp(finalUV, 0.0f, 1.0f));
-    float4 blurredColor = blurredTexture.sample(textureSampler, finalUV);
-    float4 frameColor = mix(sharpColor, blurredColor, localBlur);
+    // 8. SCREEN-SPACE Frosted Glass Optical Layer (Directly on physical screen, NOT projected)
+    if (frostAmount > 0.001f) {
+        // Surface normal of the screen-space etched grain facets
+        float bumpFactor = 0.92f * frostAmount;
+        float3 grainNormal = normalize(float3(-screenGrain.gradient.x * bumpFactor, -screenGrain.gradient.y * bumpFactor, 1.0f));
 
-    // 5. Progressive Depth Shadow (Delayed to <= 70°)
-    const float shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
-    const float shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
-    float shadowActivation = smoothstep(shadowStartAngleRad, shadowFullAngleRad, targetAngle);
+        // Directional illumination across the physical laptop screen
+        float3 screenLight = normalize(float3(0.20f, 0.55f, 0.81f));
+        float grainShading = dot(grainNormal, screenLight);
 
-    float maxShadowTop = 2.0f;
-    float maxShadowBottom = 1.0f;
-    float depthShadow = mix(maxShadowBottom, maxShadowTop, s);
-    float shadowAmount = clamp(sweepFactor * depthShadow * shadowActivation * transitionProgress * settleFactor, 0.0f, 1.0f);
-    frameColor.rgb *= (1.0f - shadowAmount);
+        // Tactile grain pattern directly on the screen: highlights on ridges, micro-shadows in etched pits
+        float ridgeHighlight = pow(max(grainShading, 0.0f), 2.2f) * 0.32f * frostAmount;
+        float pitShadow = smoothstep(0.65f, 0.15f, screenGrain.height) * 0.18f * frostAmount;
+        float grainRelief = (screenGrain.height - 0.45f) * 0.28f * frostAmount;
 
-    // 6. Simulated Keyboard Reflection (Active exclusively between 45° and 90°)
-    if (uniforms.keyboardReflection > 0.001f && delta > 0.0001f && uniforms.settleProgress < 0.999f && currentTheta > minReflectAngleRad) {
-        float4 kbReflect = sampleKeyboardReflection(finalUV, delta, currentTheta, uniforms, blurredTexture, textureSampler);
-        float refAlpha = clamp(kbReflect.a * uniforms.keyboardReflection, 0.0f, 0.85f);
-        // Specular reflection blend on glass: subtle attenuation of screen backlight + reflected light
-        frameColor.rgb = frameColor.rgb * (1.0f - 0.25f * refAlpha) + kbReflect.rgb * refAlpha;
+        // Crystalline silica micro-sparkle directly on the screen
+        float crystalGlint = pow(screenGrain.microSparkle, 18.0f) * 0.35f * frostAmount;
+
+        // Diffuse milky translucent haze across the screen
+        float3 milkyMist = float3(0.92f, 0.94f, 0.98f);
+        float mistIntensity = (0.065f + 0.045f * (1.0f - screenGrain.height)) * frostAmount;
+        frameColor.rgb = mix(frameColor.rgb, milkyMist, mistIntensity);
+
+        // Apply physical grain pattern on the screen
+        frameColor.rgb = frameColor.rgb + float3(grainRelief) + float3(ridgeHighlight - pitShadow) + float3(crystalGlint);
+
+        // Subtle satin sheen across the physical screen
+        float screenSheen = (0.05f + 0.10f * (1.0f - uv.y)) * tiltAmount * frostAmount * (0.8f + 0.4f * screenGrain.height);
+        frameColor.rgb += float3(0.95f, 0.97f, 1.0f) * screenSheen;
     }
 
-    // 7. Calibrator Overlay in Perspective (Direct surface projection)
+    // 9. Background Dimming for Clock Mode (Subtly darkens background quad for contrast)
+    if (uniforms.clockProgress > 0.001f) {
+        float dimFactor = mix(1.0f, 0.52f, uniforms.clockProgress);
+        frameColor.rgb *= dimFactor;
+    }
+
+    // 10. Digital Perspective Liquid Glass Clock Overlay (Rendered in 3D perspective over the dimmed background)
+    if (uniforms.showClock > 0.5f && uniforms.clockProgress > 0.001f) {
+        if (cleanPerspectiveUV.x >= 0.0f && cleanPerspectiveUV.x <= 1.0f &&
+            cleanPerspectiveUV.y >= 0.0f && cleanPerspectiveUV.y <= 1.0f) {
+            float4 clockPixel = clockTexture.sample(textureSampler, cleanPerspectiveUV);
+            if (clockPixel.a > 0.01f) {
+                float2 texStep = float2(1.0f / max(float(clockTexture.get_width()), 1.0f),
+                                        1.0f / max(float(clockTexture.get_height()), 1.0f));
+                float aL = clockTexture.sample(textureSampler, cleanPerspectiveUV - float2(texStep.x * 2.5f, 0.0f)).a;
+                float aR = clockTexture.sample(textureSampler, cleanPerspectiveUV + float2(texStep.x * 2.5f, 0.0f)).a;
+                float aT = clockTexture.sample(textureSampler, cleanPerspectiveUV - float2(0.0f, texStep.y * 2.5f)).a;
+                float aB = clockTexture.sample(textureSampler, cleanPerspectiveUV + float2(0.0f, texStep.y * 2.5f)).a;
+                float2 glassNormal2D = float2(aR - aL, aB - aT);
+
+                // Optical liquid glass refraction of the 3D-warped background behind the digits
+                float2 refractOffset = glassNormal2D * 0.022f;
+                float2 refractUV = clamp(finalUV - refractOffset, 0.0f, 1.0f);
+                float4 refSharp = screenTexture.sample(textureSampler, refractUV);
+                float4 refBlur = blurredTexture.sample(textureSampler, refractUV);
+                float3 glassBg = mix(refSharp.rgb, refBlur.rgb, 0.30f);
+
+                // Chromatic dispersion through curved meniscus
+                glassBg.r = mix(glassBg.r, screenTexture.sample(textureSampler, clamp(refractUV - glassNormal2D * 0.003f, 0.0f, 1.0f)).r, 0.35f);
+                glassBg.b = mix(glassBg.b, screenTexture.sample(textureSampler, clamp(refractUV + glassNormal2D * 0.003f, 0.0f, 1.0f)).b, 0.35f);
+
+                // Specular skylight reflection on liquid glass meniscus
+                float rimGrad = length(glassNormal2D);
+                float3 N = normalize(float3(-glassNormal2D * 1.8f, 1.0f));
+                float3 L = normalize(float3(0.0f, -0.7f, 0.7f));
+                float spec = pow(max(dot(N, L), 0.0f), 10.0f) * 0.28f;
+                float rim = smoothstep(0.12f, 0.65f, rimGrad) * 0.22f;
+
+                float3 liquidGlassColor = mix(glassBg, clockPixel.rgb, 0.62f) + float3(spec + rim);
+                float clockAlpha = clockPixel.a * uniforms.clockProgress;
+                frameColor.rgb = mix(frameColor.rgb, liquidGlassColor, clockAlpha);
+            }
+        }
+    }
+
+    // 11. Calibrator Overlay in Perspective (Rendered over/on top of frosted glass and clock for crisp readability)
     if (uniforms.showCalibrator > 0.5f) {
-        if (finalUV.x >= 0.0f && finalUV.x <= 1.0f && finalUV.y >= 0.0f && finalUV.y <= 1.0f) {
-            float4 calib = calibratorTexture.sample(textureSampler, finalUV);
+        if (cleanPerspectiveUV.x >= 0.0f && cleanPerspectiveUV.x <= 1.0f &&
+            cleanPerspectiveUV.y >= 0.0f && cleanPerspectiveUV.y <= 1.0f) {
+            float4 calib = calibratorTexture.sample(textureSampler, cleanPerspectiveUV);
             frameColor.rgb = frameColor.rgb * (1.0f - calib.a) + calib.rgb;
         }
     }
 
-    // 8. Seamless Silhouette Edge Mask
-    // Only fall off into black outside the [0, 1] texture coordinates
-    // At the bottom hinge (finalUV.y >= 1.0), the screen connects to the laptop base so it never clips into black
-    float distLeft   = max(-finalUV.x, 0.0f);
-    float distRight  = max(finalUV.x - 1.0f, 0.0f);
-    float distTop    = max(-finalUV.y, 0.0f);
-    float outsideDist = max(max(distLeft, distRight), distTop);
-
-    // If outside bottom edge, keep solid to avoid black gap at the hinge
-    float borderMask = (edgeBleed > 0.0001f) ? (1.0f - smoothstep(0.0f, edgeBleed, outsideDist)) : (outsideDist <= 0.0f ? 1.0f : 0.0f);
-
-    return mix(float4(0.0f, 0.0f, 0.0f, 1.0f), frameColor, borderMask);
+    return frameColor;
 }
+
+// MARK: - External Display Shader (Zoom Out, Progressive Blur, and Darken)
+struct ExternalDisplayUniforms {
+    float angle;            // Lid angle in radians
+    float settleProgress;   // 0.0 (active) to 1.0 (settled back to flat 1:1)
+    float maxZoomOut;       // Max zoom-out factor (e.g. 0.10)
+    float maxBlur;          // Max blur factor (0.0 to 1.0)
+    float maxDarken;        // Max darken factor (0.0 to 1.0)
+    float aspect;           // Display aspect ratio
+    float pad0;
+    float pad1;
+};
+
+fragment float4 fragment_external_display(RasterizerData in [[stage_in]],
+                                         texture2d<float> screenTexture [[texture(0)]],
+                                         texture2d<float> blurredTexture [[texture(1)]],
+                                         sampler textureSampler [[sampler(0)]],
+                                         constant ExternalDisplayUniforms &uniforms [[buffer(0)]]) {
+    float2 uv = in.texCoords;
+    const float uprightRad = 1.5707963f; // 90° in radians
+
+    // When fully settled, return clean original
+    if (uniforms.settleProgress >= 0.999f) {
+        return screenTexture.sample(textureSampler, uv);
+    }
+
+    // Blend target angle toward upright 90° when settling
+    float targetAngle = mix(uniforms.angle, uprightRad, clamp(uniforms.settleProgress, 0.0f, 1.0f));
+    float currentTheta = min(targetAngle, uprightRad);
+    float delta = uprightRad - currentTheta;
+
+    if (delta <= 0.0001f) {
+        return screenTexture.sample(textureSampler, uv);
+    }
+
+    // Normalized progress: 0.0 at 90°, 1.0 at 15°
+    float progress = clamp(delta / (75.0f * (3.14159265f / 180.0f)), 0.0f, 1.0f);
+    float smoothP = smoothstep(0.0f, 1.0f, progress);
+
+    // Settle factor: 1.0 when active, ramps to 0.0 during settle tween
+    float settleFactor = 1.0f - clamp(uniforms.settleProgress, 0.0f, 1.0f);
+    float activeProgress = smoothP * settleFactor;
+
+    // 1. Progressive Zoom Out from screen center (no perspective / keystone)
+    float zoomOutAmount = clamp(uniforms.maxZoomOut, 0.02f, 0.35f) * activeProgress;
+    float scale = max(1.0f - zoomOutAmount, 0.40f);
+    float2 centeredUV = (uv - 0.5f) / scale + 0.5f;
+
+    // Progressive blur intensity
+    float blurFactor = clamp(activeProgress * uniforms.maxBlur, 0.0f, 1.0f);
+
+    // Dynamic rounded corner radius and soft optical blur falloff
+    // cornerRadius provides a smooth Apple-style rounded window boundary
+    // edgeBlurSpread softens the perimeter into a seamless Gaussian blur halo
+    float cornerRadius = mix(0.002f, 0.090f, activeProgress);
+    float edgeBlurSpread = mix(0.002f, 0.070f, blurFactor);
+
+    // Aspect-corrected rounded box SDF (sdRoundedBox)
+    // Eliminates diagonal miter creases by evaluating true circular Euclidean distance at corners
+    float2 aspectScale = float2(uniforms.aspect, 1.0f);
+    float2 p = abs(centeredUV - 0.5f) * aspectScale;
+    float2 halfSize = float2(0.5f * uniforms.aspect, 0.5f);
+    float2 q = p - halfSize + float2(cornerRadius);
+
+    float outsideDist = length(max(q, float2(0.0f)));
+    float insideDist = min(max(q.x, q.y), 0.0f);
+    float sdf = outsideDist + insideDist - cornerRadius;
+
+    // Early exit if completely beyond the soft blurred edge falloff
+    if (sdf > edgeBlurSpread) {
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
+    // 2. Progressive Blur: sample textures with clamped coordinates to allow seamless outward edge bleed
+    float2 sampleUV = clamp(centeredUV, 0.0f, 1.0f);
+    float4 sharpCol = screenTexture.sample(textureSampler, sampleUV);
+    float4 blurCol = blurredTexture.sample(textureSampler, sampleUV);
+    float4 col = mix(sharpCol, blurCol, blurFactor);
+
+    // 3. Progressive Darkening & Vignette
+    float darkenFactor = clamp(activeProgress * uniforms.maxDarken, 0.0f, 0.85f);
+    float2 vignetteOffset = (uv - 0.5f) * float2(uniforms.aspect, 1.0f);
+    float vignetteDist = length(vignetteOffset);
+    float vignette = smoothstep(0.35f, 1.15f, vignetteDist) * 0.20f * activeProgress;
+
+    col.rgb *= (1.0f - darkenFactor) * (1.0f - vignette);
+
+    // 4. Soft Rounded Edge Blur Falloff
+    // Smoothly blends from full opacity inside to zero opacity outside along the rounded contour
+    float edgeAlpha = 1.0f - smoothstep(-edgeBlurSpread, edgeBlurSpread, sdf);
+    col.rgb = mix(float3(0.0f, 0.0f, 0.0f), col.rgb, edgeAlpha);
+
+    return col;
+}
+
