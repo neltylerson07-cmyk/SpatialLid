@@ -462,6 +462,12 @@ static float4 sampleKeyboardReflection(float2 finalUV,
     return float4(col, alpha);
 }
 
+static inline float fastHash21(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
 // MARK: - Frosted Glass Grain Pattern Synthesizer
 struct FrostedGrainResult {
     float height;        // Surface relief height (0.0 to 1.0)
@@ -509,12 +515,12 @@ static FrostedGrainResult sampleFrostedGlassGrain(float2 uv, float aspect) {
     float2 pMed = uv * float2(aspect * 760.0f / 1.5, 760.0f / 1.5);
     float2 ipMed = floor(pMed);
     float2 fpMed = fract(pMed);
-    float medHash = fract(sin(dot(ipMed, float2(127.1f, 311.7f))) * 43758.5453f);
+    float medHash = fastHash21(ipMed);
     float medGrain = medHash * (1.0f - length(fpMed - 0.5f) * 1.4f);
 
     // Tertiary high-frequency crystal sparkle (sandblasted quartz glitter)
     float2 pSparkle = uv * float2(aspect * 1900.0f / 1.5, 1900.0f / 1.5);
-    float sparkle = fract(sin(dot(pSparkle, float2(269.5f, 183.3f))) * 43758.5453f);
+    float sparkle = fastHash21(pSparkle);
 
     // Composite height and analytical gradient
     result.height = clamp(cellFacet * 0.70f + medGrain * 0.30f, 0.0f, 1.0f);

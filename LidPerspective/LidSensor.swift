@@ -48,9 +48,14 @@ final class LidSensor: ObservableObject {
         let totalForwardTime = elapsedSinceSample + lookahead
         var forwardDelta = effectiveVelocity * totalForwardTime
 
-        // Soft-clamp the maximum forward projection delta (±12°)
-        // to prevent jarring overshoot during rapid hand movements
-        let maxLeadDegrees = 12.0
+        // When lifting the lid up (effectiveVelocity > 0), maintain natural direction
+        // but reduce the forward lookahead strength (0.30) and cap lead degrees so it doesn't race ahead
+        if effectiveVelocity > 0 {
+            forwardDelta *= -0.5
+        }
+
+        // Soft-clamp the maximum projection delta
+        let maxLeadDegrees = effectiveVelocity > 0 ? 3.5 : 12.0
         forwardDelta = min(max(forwardDelta, -maxLeadDegrees), maxLeadDegrees)
 
         let projected = angle + forwardDelta
@@ -199,8 +204,8 @@ final class LidSensor: ObservableObject {
                                 calculatedVelocity = numerator / denominator
                                 // Clamp to physical human bounds
                                 calculatedVelocity = min(max(calculatedVelocity, -360.0), 360.0)
-                                // Deadzone tiny jitter (< 1.5 deg/sec)
-                                if abs(calculatedVelocity) < 1.5 {
+                                // Deadzone sensor noise (< 0.4 deg/sec)
+                                if abs(calculatedVelocity) < 0.4 {
                                     calculatedVelocity = 0.0
                                 }
                             }
@@ -216,11 +221,14 @@ final class LidSensor: ObservableObject {
 
                         // Detect 90° threshold crossing immediately
                         let crossedThreshold = (prev >= 90.0 && angle < 90.0) || (prev < 90.0 && angle >= 90.0)
+                        let isNearThreshold = (angle >= 85.0 && angle <= 112.0)
+                        let isMoving = abs(calculatedVelocity) > 0.8
+                        let shouldDispatchFast = crossedThreshold || isNearThreshold || isMoving
 
-                        // Update UI label at ~12 Hz to prevent main thread overhead,
-                        // or immediately when crossing 90° threshold
+                        // Low latency dispatch in critical transition zones (~8ms), throttled when stationary (~32ms)
                         self.uiUpdateCounter += 1
-                        if crossedThreshold || self.uiUpdateCounter >= 10 {
+                        let thresholdLimit = crossedThreshold ? 1 : (shouldDispatchFast ? 2 : 8)
+                        if self.uiUpdateCounter >= thresholdLimit {
                             self.uiUpdateCounter = 0
                             DispatchQueue.main.async {
                                 self.displayAngle = angle

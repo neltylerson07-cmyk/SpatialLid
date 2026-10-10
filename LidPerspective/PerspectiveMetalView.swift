@@ -5,13 +5,16 @@ import MetalPerformanceShaders
 
 struct PerspectiveMetalView: NSViewRepresentable {
     var snapshot: CGImage?
+    var preloadedTexture: MTLTexture? = nil
+    var preloadedBlurredTexture: MTLTexture? = nil
     var calibratorImage: CGImage? = nil
     var showCalibrator: Bool = false
     var clockImage: CGImage? = nil
     var isClockActive: Bool = false
     var sensor: LidSensor? = nil
     var fallbackAngle: Double = 90.0
-    var lookahead: Double = 0.22
+    var lookahead: Double = 0.18
+    var activationCount: Int = 0
     var keystoneStrength: Float
     var stretchBalance: Float
     var lowAngleCompensation: Float = 1.00
@@ -43,6 +46,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         }
         
         // Match the display's native refresh rate (up to 120Hz ProMotion)
+        mtkView.preferredFramesPerSecond = 120
         mtkView.isPaused = false
         mtkView.enableSetNeedsDisplay = false
         return mtkView
@@ -54,6 +58,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
             if nsView.colorspace != colorSpace {
                 nsView.colorspace = colorSpace
             }
+        }
+
+        if context.coordinator.activationCount != activationCount {
+            context.coordinator.activationCount = activationCount
+            context.coordinator.reset(angle: fallbackAngle)
         }
 
         context.coordinator.onFirstFrame = onFirstFrame
@@ -71,6 +80,8 @@ struct PerspectiveMetalView: NSViewRepresentable {
 
         context.coordinator.updateParameters(
             snapshot: snapshot,
+            preloadedTexture: preloadedTexture,
+            preloadedBlurredTexture: preloadedBlurredTexture,
             calibratorImage: calibratorImage,
             clockImage: clockImage,
             targetAngle: fallbackAngle,
@@ -97,8 +108,64 @@ struct PerspectiveMetalView: NSViewRepresentable {
     final class Coordinator: NSObject, MTKViewDelegate {
         var onFirstFrame: (() -> Void)?
         var sensor: LidSensor?
-        var lookahead: Double = 0.22
+        var lookahead: Double = 0.18
+        var activationCount: Int = -1
+
+        func reset(angle: Double) {
+            let initial = min(angle, 90.0)
+            self.smoothedAngle = initial
+            self.targetAngle = initial
+            self.isFirstFrame = true
+            self.isSettling = false
+            self.hasFiredFirstFrame = false
+        }
         private var hasFiredFirstFrame = false
+
+        // Shared static GPU assets to eliminate main-thread recompilations
+        private static let sharedDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
+        private static let sharedCommandQueue: MTLCommandQueue? = sharedDevice?.makeCommandQueue()
+        private static let sharedPipelineState: MTLRenderPipelineState? = {
+            guard let device = sharedDevice,
+                  let library = device.makeDefaultLibrary(),
+                  let vertexFunc = library.makeFunction(name: "vertex_main"),
+                  let fragmentFunc = library.makeFunction(name: "fragment_main") else { return nil }
+
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = vertexFunc
+            desc.fragmentFunction = fragmentFunc
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            return try? device.makeRenderPipelineState(descriptor: desc)
+        }()
+        private static let sharedSampler: MTLSamplerState? = {
+            guard let device = sharedDevice else { return nil }
+            let desc = MTLSamplerDescriptor()
+            desc.minFilter = .linear
+            desc.magFilter = .linear
+            desc.sAddressMode = .clampToEdge
+            desc.tAddressMode = .clampToEdge
+            return device.makeSamplerState(descriptor: desc)
+        }()
+        private static let sharedDefaultTexture: MTLTexture? = {
+            guard let device = sharedDevice else { return nil }
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: 1,
+                height: 1,
+                mipmapped: false
+            )
+            desc.usage = [.shaderRead]
+            if let texture = device.makeTexture(descriptor: desc) {
+                var transparentPixel: UInt32 = 0
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, 1, 1),
+                    mipmapLevel: 0,
+                    withBytes: &transparentPixel,
+                    bytesPerRow: 4
+                )
+                return texture
+            }
+            return nil
+        }()
 
         private var device: MTLDevice?
         private var commandQueue: MTLCommandQueue?
@@ -121,6 +188,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var defaultClockTexture: MTLTexture?
 
         // Smooth interpolation state
+        private var isFirstFrame = true
         private var targetAngle: Double = 90.0
         private var smoothedAngle: Double = 90.0
         private var keystoneStrength: Float = 0.18
@@ -137,10 +205,9 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var shadowIntensity: Float = 1.00
         private var lowAngleCompensation: Float = 1.00
 
-        // Tween / Settle to full screen
         private(set) var isSettling: Bool = false
         private var settleStartTime: CFTimeInterval = 0.0
-        private let settleDuration: CFTimeInterval = 0.32 // Quick 320ms tween to full screen
+        private let settleDuration: CFTimeInterval = 0.28
         private var frozenAngle: Double = 90.0
         var onSettleCompleted: (() -> Void)?
 
@@ -149,64 +216,32 @@ struct PerspectiveMetalView: NSViewRepresentable {
             var aspect: Float
             var keystoneStrength: Float
             var stretchBalance: Float
-            var settleProgress: Float = 0.0
-            var keyboardReflection: Float = 0.48
-            var keyboardTilt: Float = 0.35
-            var keyboardReach: Float = 0.38
-            var keyboardBacklight: Float = 1.50
-            var keyboardOffset: Float = -0.02
-            var keyboardWidth: Float = 0.88
-            var keyboardDepthBlur: Float = 0.30
-            var showCalibrator: Float = 0.0
-            var frostedGlass: Float = 0.65
-            var blurIntensity: Float = 1.00
-            var shadowIntensity: Float = 1.00
-            var lowAngleCompensation: Float = 1.00
-            var clockProgress: Float = 0.0
-            var showClock: Float = 0.0
+            var settleProgress: Float
+            var keyboardReflection: Float
+            var keyboardTilt: Float
+            var keyboardReach: Float
+            var keyboardBacklight: Float
+            var keyboardOffset: Float
+            var keyboardWidth: Float
+            var keyboardDepthBlur: Float
+            var showCalibrator: Float
+            var frostedGlass: Float
+            var blurIntensity: Float
+            var shadowIntensity: Float
+            var lowAngleCompensation: Float
+            var clockProgress: Float
+            var showClock: Float
             var pad0: Float = 0.0
         }
 
         override init() {
             super.init()
-            guard let device = MTLCreateSystemDefaultDevice() else { return }
-            self.device = device
-            self.commandQueue = device.makeCommandQueue()
-
-            buildPipeline(device: device)
-            buildSampler(device: device)
-            buildDefaultCalibratorTexture(device: device)
-            buildDefaultClockTexture(device: device)
-        }
-
-        private func buildDefaultClockTexture(device: MTLDevice) {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm,
-                width: 1,
-                height: 1,
-                mipmapped: false
-            )
-            desc.usage = [.shaderRead]
-            if let dummy = device.makeTexture(descriptor: desc) {
-                var zero: UInt32 = 0
-                dummy.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 4)
-                self.defaultClockTexture = dummy
-            }
-        }
-
-        private func buildDefaultCalibratorTexture(device: MTLDevice) {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm,
-                width: 1,
-                height: 1,
-                mipmapped: false
-            )
-            desc.usage = [.shaderRead]
-            if let dummy = device.makeTexture(descriptor: desc) {
-                var zero: UInt32 = 0
-                dummy.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 4)
-                self.defaultCalibratorTexture = dummy
-            }
+            self.device = Self.sharedDevice
+            self.commandQueue = Self.sharedCommandQueue
+            self.pipelineState = Self.sharedPipelineState
+            self.textureSampler = Self.sharedSampler
+            self.defaultCalibratorTexture = Self.sharedDefaultTexture
+            self.defaultClockTexture = Self.sharedDefaultTexture
         }
 
         func startSettling() {
@@ -219,31 +254,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
         func cancelSettling() {
             isSettling = false
         }
-
-        private func buildPipeline(device: MTLDevice) {
-            guard let library = device.makeDefaultLibrary(),
-                  let vertexFunc = library.makeFunction(name: "vertex_main"),
-                  let fragmentFunc = library.makeFunction(name: "fragment_main") else { return }
-
-            let desc = MTLRenderPipelineDescriptor()
-            desc.vertexFunction = vertexFunc
-            desc.fragmentFunction = fragmentFunc
-            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
-            pipelineState = try? device.makeRenderPipelineState(descriptor: desc)
-        }
-
-        private func buildSampler(device: MTLDevice) {
-            let desc = MTLSamplerDescriptor()
-            desc.minFilter = .linear
-            desc.magFilter = .linear
-            // Clamp to edge avoids black borders when UVs touch 0.0 or 1.0
-            desc.sAddressMode = .clampToEdge
-            desc.tAddressMode = .clampToEdge
-            textureSampler = device.makeSamplerState(descriptor: desc)
-        }
         
         func updateParameters(
             snapshot: CGImage?,
+            preloadedTexture: MTLTexture? = nil,
+            preloadedBlurredTexture: MTLTexture? = nil,
             calibratorImage: CGImage?,
             clockImage: CGImage? = nil,
             targetAngle: Double,
@@ -262,6 +277,9 @@ struct PerspectiveMetalView: NSViewRepresentable {
             lowAngleCompensation: Float
         ) {
             self.targetAngle = targetAngle
+            if isFirstFrame {
+                self.smoothedAngle = min(targetAngle, 90.0)
+            }
             self.keystoneStrength = keystone
             self.stretchBalance = balance
             self.keyboardReflection = keyboardReflection
@@ -276,7 +294,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
             self.shadowIntensity = shadowIntensity
             self.lowAngleCompensation = lowAngleCompensation
 
-            if let snapshot = snapshot, snapshot !== lastLoadedSnapshotID, let device = self.device {
+            // If textures were pre-prepared asynchronously, use them directly (0ms main thread cost!)
+            if let preloaded = preloadedTexture, let preloadedBlur = preloadedBlurredTexture {
+                self.texture = preloaded
+                self.blurredTexture = preloadedBlur
+            } else if let snapshot = snapshot, snapshot !== lastLoadedSnapshotID, let device = self.device {
                 self.lastLoadedSnapshotID = snapshot
                 let loader = MTKTextureLoader(device: device)
                 let loadedTexture = try? loader.newTexture(cgImage: snapshot, options: [
@@ -341,9 +363,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 bytesPerRow: bytesPerRow,
                 space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
-            ) else {
-                return nil
-            }
+            ) else { return nil }
 
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
             texture.replace(
@@ -384,10 +404,15 @@ struct PerspectiveMetalView: NSViewRepresentable {
             guard let pipelineState = pipelineState,
                   let drawable = view.currentDrawable,
                   let renderPass = view.currentRenderPassDescriptor,
-                  let commandBuffer = commandQueue?.makeCommandBuffer(),
-                  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass),
                   let texture = texture,
                   let blurredTexture = blurredTexture else { return }
+
+            // Optimization: The fullscreen quad writes all pixels, so dontCare saves clear overhead
+            renderPass.colorAttachments[0].loadAction = .dontCare
+            renderPass.colorAttachments[0].storeAction = .store
+
+            guard let commandBuffer = commandQueue?.makeCommandBuffer(),
+                  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else { return }
 
             var settleFactor: Float = 0.0
             if isSettling {
@@ -410,15 +435,19 @@ struct PerspectiveMetalView: NSViewRepresentable {
             if isSettling {
                 targetAngle = frozenAngle
             } else if let sensor = self.sensor {
-                targetAngle = sensor.extrapolatedAngle(lookahead: self.lookahead)
+                targetAngle = min(sensor.extrapolatedAngle(lookahead: self.lookahead), 90.0)
             } else {
-                targetAngle = self.targetAngle
+                targetAngle = min(self.targetAngle, 90.0)
             }
 
-            if isSettling {
+            if isFirstFrame {
+                isFirstFrame = false
+                self.smoothedAngle = targetAngle
+            } else if isSettling {
                 self.smoothedAngle = frozenAngle
             } else {
-                let smoothingFactor = 0.25
+                let speed = abs(sensor?.latestVelocity ?? 0.0)
+                let smoothingFactor = min(max(0.15 + speed * 0.005, 0.25), 0.2)
                 self.smoothedAngle += (targetAngle - self.smoothedAngle) * smoothingFactor
             }
             

@@ -81,6 +81,108 @@ final class FullscreenOverlayController: ObservableObject {
         viewState.isSettling
     }
 
+    /// Pre-warms the builtin overlay window once to avoid runtime allocation latency
+    func prepareBuiltinWindow(sensor: LidSensor) {
+        guard builtinWindow == nil else { return }
+        guard let screen = NSScreen.main else { return }
+
+        let newWindow = KeyCatchingWindow(
+            contentRect: screen.frame,
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        newWindow.setFrame(screen.frame, display: false)
+        newWindow.alphaValue = 1.0
+        newWindow.isOpaque = true
+        newWindow.backgroundColor = .black
+        newWindow.hasShadow = false
+
+        newWindow.onEscape = { [weak self] in
+            self?.dismiss()
+        }
+        newWindow.onToggleHUD = { [weak self] in
+            self?.viewState.showHUD.toggle()
+        }
+        newWindow.onToggleCalibrator = { [weak self] in
+            guard let self = self else { return }
+            guard self.viewState.isSettingsWindowAvailable else { return }
+            if !self.viewState.showCalibrator && sensor.displayAngle >= 90.0 {
+                return
+            }
+            self.viewState.showCalibrator.toggle()
+            if self.viewState.showCalibrator {
+                self.viewState.requestRender()
+            }
+        }
+        newWindow.onArrowUp = { [weak self] in
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.previousSetting()
+        }
+        newWindow.onArrowDown = { [weak self] in
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.nextSetting()
+        }
+        newWindow.onArrowLeft = { [weak self] in
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.adjustSelectedSetting(by: -1)
+        }
+        newWindow.onArrowRight = { [weak self] in
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.adjustSelectedSetting(by: 1)
+        }
+        newWindow.onReset = { [weak self] in
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.resetToDefaults()
+        }
+        newWindow.onToggleKeyboard = { [weak self] in
+            guard let self = self else { return }
+            self.viewState.isKeyboardReflectionEnabled.toggle()
+            if self.viewState.showCalibrator {
+                self.viewState.requestRender()
+            }
+        }
+        newWindow.onToggleFrostedGlass = { [weak self] in
+            guard let self = self else { return }
+            self.viewState.isFrostedGlassEnabled.toggle()
+            if self.viewState.showCalibrator {
+                self.viewState.requestRender()
+            }
+        }
+
+        newWindow.level = NSWindow.Level(Int(CGWindowLevelForKey(.screenSaverWindow)))
+        newWindow.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle
+        ]
+
+        let hostView = NSHostingView(
+            rootView: FullscreenPerspectiveContainer(
+                sensor: sensor,
+                state: viewState,
+                onDismiss: { [weak self] in
+                    self?.dismiss()
+                }
+            )
+            .ignoresSafeArea()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
+
+        newWindow.contentView = hostView
+        self.builtinWindow = newWindow
+    }
+
+    /// Dynamically updates Metal textures in-place without touching window visibility
+    func updateTextures(snapshots: MultiScreenSnapshots) {
+        if let builtinSnapshot = snapshots.builtinSnapshot {
+            viewState.currentSnapshot = builtinSnapshot
+            viewState.currentTexture = snapshots.builtinTextures?.texture
+            viewState.currentBlurredTexture = snapshots.builtinTextures?.blurredTexture
+        }
+    }
+
     func show(
         snapshots: MultiScreenSnapshots,
         sensor: LidSensor,
@@ -88,7 +190,8 @@ final class FullscreenOverlayController: ObservableObject {
         onDismiss: (() -> Void)? = nil
     ) {
         if isShowing {
-            dismiss()
+            updateTextures(snapshots: snapshots)
+            return
         }
 
         self.onDismissal = onDismiss
@@ -97,111 +200,26 @@ final class FullscreenOverlayController: ObservableObject {
         if let builtinSnapshot = snapshots.builtinSnapshot,
            let screen = snapshots.builtinScreen ?? NSScreen.main {
             // Reset settle state when showing fresh overlay
+            viewState.activationCount += 1
             viewState.isSettling = false
             viewState.onSettleCompleted = nil
             viewState.showCalibrator = showCalibrator
             viewState.screenSize = screen.frame.size
-            viewState.requestRender()
+            viewState.currentSnapshot = builtinSnapshot
+            viewState.currentTexture = snapshots.builtinTextures?.texture
+            viewState.currentBlurredTexture = snapshots.builtinTextures?.blurredTexture
 
-            let overlayWindow = KeyCatchingWindow(
-                contentRect: screen.frame,
-                styleMask: [.borderless],
-                backing: .buffered,
-                defer: false
-            )
-            overlayWindow.setFrame(screen.frame, display: true)
-            overlayWindow.alphaValue = 0.0
-            overlayWindow.isOpaque = false
-            overlayWindow.backgroundColor = .clear
-            overlayWindow.hasShadow = false
-
-            overlayWindow.onEscape = { [weak self] in
-                self?.dismiss()
-            }
-            overlayWindow.onToggleHUD = { [weak self] in
-                self?.viewState.showHUD.toggle()
-            }
-            overlayWindow.onToggleCalibrator = { [weak self] in
-                guard let self = self else { return }
-                guard self.viewState.isSettingsWindowAvailable else { return }
-                if !self.viewState.showCalibrator && sensor.displayAngle >= 90.0 {
-                    return
-                }
-                self.viewState.showCalibrator.toggle()
-                if self.viewState.showCalibrator {
-                    self.viewState.requestRender()
-                }
-            }
-            overlayWindow.onArrowUp = { [weak self] in
-                guard let self = self, self.viewState.showCalibrator else { return }
-                self.viewState.previousSetting()
-            }
-            overlayWindow.onArrowDown = { [weak self] in
-                guard let self = self, self.viewState.showCalibrator else { return }
-                self.viewState.nextSetting()
-            }
-            overlayWindow.onArrowLeft = { [weak self] in
-                guard let self = self, self.viewState.showCalibrator else { return }
-                self.viewState.adjustSelectedSetting(by: -1)
-            }
-            overlayWindow.onArrowRight = { [weak self] in
-                guard let self = self, self.viewState.showCalibrator else { return }
-                self.viewState.adjustSelectedSetting(by: 1)
-            }
-            overlayWindow.onReset = { [weak self] in
-                guard let self = self, self.viewState.showCalibrator else { return }
-                self.viewState.resetToDefaults()
-            }
-            overlayWindow.onToggleKeyboard = { [weak self] in
-                guard let self = self else { return }
-                self.viewState.isKeyboardReflectionEnabled.toggle()
-                if self.viewState.showCalibrator {
-                    self.viewState.requestRender()
-                }
-            }
-            overlayWindow.onToggleFrostedGlass = { [weak self] in
-                guard let self = self else { return }
-                self.viewState.isFrostedGlassEnabled.toggle()
-                if self.viewState.showCalibrator {
-                    self.viewState.requestRender()
-                }
+            if showCalibrator {
+                viewState.requestRender()
             }
 
-            overlayWindow.level = NSWindow.Level(Int(CGWindowLevelForKey(.screenSaverWindow)))
-            overlayWindow.collectionBehavior = [
-                .canJoinAllSpaces,
-                .fullScreenAuxiliary,
-                .stationary,
-                .ignoresCycle
-            ]
+            prepareBuiltinWindow(sensor: sensor)
 
-            let hostView = NSHostingView(
-                rootView: FullscreenPerspectiveContainer(
-                    snapshot: builtinSnapshot,
-                    sensor: sensor,
-                    state: viewState,
-                    onFirstFrame: { [weak overlayWindow] in
-                        guard let window = overlayWindow else { return }
-                        NSAnimationContext.runAnimationGroup { context in
-                            context.duration = 0.12
-                            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                            window.animator().alphaValue = 1.0
-                        } completionHandler: { [weak overlayWindow] in
-                            overlayWindow?.backgroundColor = .black
-                            overlayWindow?.isOpaque = true
-                        }
-                    },
-                    onDismiss: { [weak self] in
-                        self?.dismiss()
-                    }
-                )
-                .ignoresSafeArea()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            )
-
-            overlayWindow.contentView = hostView
-            overlayWindow.makeKeyAndOrderFront(nil)
-            self.builtinWindow = overlayWindow
+            if let overlayWindow = builtinWindow {
+                overlayWindow.setFrame(screen.frame, display: true)
+                overlayWindow.alphaValue = 1.0
+                overlayWindow.makeKeyAndOrderFront(nil)
+            }
         }
 
         // 2. Setup External Monitor Overlays (Zoom Out, Progressive Blur, and Darken)
@@ -217,9 +235,9 @@ final class FullscreenOverlayController: ObservableObject {
                     defer: false
                 )
                 extWindow.setFrame(ext.screen.frame, display: true)
-                extWindow.alphaValue = 0.0
-                extWindow.isOpaque = false
-                extWindow.backgroundColor = .clear
+                extWindow.alphaValue = 1.0
+                extWindow.isOpaque = true
+                extWindow.backgroundColor = .black
                 extWindow.hasShadow = false
 
                 extWindow.onEscape = { [weak self] in
@@ -242,19 +260,11 @@ final class FullscreenOverlayController: ObservableObject {
                 let extHostView = NSHostingView(
                     rootView: ExternalMonitorContainer(
                         snapshot: ext.image,
+                        preloadedTexture: ext.textures?.texture,
+                        preloadedBlurredTexture: ext.textures?.blurredTexture,
                         sensor: sensor,
                         controller: self,
-                        onFirstFrame: { [weak extWindow] in
-                            guard let window = extWindow else { return }
-                            NSAnimationContext.runAnimationGroup { context in
-                                context.duration = 0.12
-                                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                                window.animator().alphaValue = 1.0
-                            } completionHandler: { [weak extWindow] in
-                                extWindow?.backgroundColor = .black
-                                extWindow?.isOpaque = true
-                            }
-                        }
+                        onFirstFrame: nil
                     )
                     .ignoresSafeArea()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -345,24 +355,21 @@ final class FullscreenOverlayController: ObservableObject {
             completion?()
             return
         }
-        builtinWindow = nil
         if externalWindows.isEmpty {
             isShowing = false
         }
-        activeWindow.isOpaque = false
-        activeWindow.backgroundColor = .clear
-
         let handler = self.onDismissal
         if externalWindows.isEmpty {
             self.onDismissal = nil
         }
 
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.14
+            context.duration = 0.10
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             activeWindow.animator().alphaValue = 0.0
         }, completionHandler: {
             activeWindow.orderOut(nil)
+            activeWindow.alphaValue = 1.0
             DispatchQueue.main.async {
                 if self.externalWindows.isEmpty {
                     handler?()
@@ -407,7 +414,6 @@ final class FullscreenOverlayController: ObservableObject {
         let activeBuiltin = builtinWindow
         let activeExternals = externalWindows
 
-        builtinWindow = nil
         externalWindows.removeAll()
         isShowing = false
         isExternalShowing = false
@@ -416,22 +422,20 @@ final class FullscreenOverlayController: ObservableObject {
         self.onDismissal = nil
 
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.12
+            context.duration = 0.10
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             if let bWindow = activeBuiltin {
-                bWindow.isOpaque = false
-                bWindow.backgroundColor = .clear
                 bWindow.animator().alphaValue = 0.0
             }
             for extWindow in activeExternals {
-                extWindow.isOpaque = false
-                extWindow.backgroundColor = .clear
                 extWindow.animator().alphaValue = 0.0
             }
         }, completionHandler: {
             activeBuiltin?.orderOut(nil)
+            activeBuiltin?.alphaValue = 1.0
             for extWindow in activeExternals {
                 extWindow.orderOut(nil)
+                extWindow.alphaValue = 1.0
             }
             DispatchQueue.main.async {
                 handler?()
@@ -548,6 +552,11 @@ enum TunableSetting: Int, CaseIterable, Identifiable {
 
 @MainActor
 final class OverlayViewState: ObservableObject {
+    // Cached snapshot and GPU textures for instant presentation
+    @Published var currentSnapshot: CGImage?
+    @Published var currentTexture: MTLTexture?
+    @Published var currentBlurredTexture: MTLTexture?
+
     @Published var showHUD: Bool = false
     @Published var showCalibrator: Bool = false
     // Window Focus / State tracking for Calibrator activation guard
@@ -574,7 +583,8 @@ final class OverlayViewState: ObservableObject {
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
     @Published var lowAngleCompensation: Float = 1.00
-    @Published var lookaheadTime: Double = 0.22
+    @Published var lookaheadTime: Double = 0.18
+    @Published var activationCount: Int = 0
     @Published var isKeyboardReflectionEnabled: Bool = true
     @Published var keyboardReflection: Float = 0.44
     @Published var isFrostedGlassEnabled: Bool = true
@@ -678,7 +688,7 @@ final class OverlayViewState: ObservableObject {
         keystoneStrength = 0.18
         stretchBalance = 0.56
         lowAngleCompensation = 1.00
-        lookaheadTime = 0.22
+        lookaheadTime = 0.18
         isKeyboardReflectionEnabled = true
         keyboardReflection = 0.44
         isFrostedGlassEnabled = true
@@ -707,6 +717,7 @@ final class OverlayViewState: ObservableObject {
     }
 
     func requestRender() {
+        guard showCalibrator else { return }
         let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         let view = WarpedSettingsCardContainer(state: self, isDarkMode: isDarkMode)
             .environment(\.colorScheme, isDarkMode ? .dark : .light)
@@ -1247,8 +1258,7 @@ private class KeyCatchingWindow: NSWindow {
 
 // MARK: - Fullscreen Perspective Container
 private struct FullscreenPerspectiveContainer: View {
-    let snapshot: CGImage
-    @ObservedObject var sensor: LidSensor
+    let sensor: LidSensor
     @ObservedObject var state: OverlayViewState
     var onFirstFrame: (() -> Void)? = nil
     let onDismiss: () -> Void
@@ -1257,7 +1267,9 @@ private struct FullscreenPerspectiveContainer: View {
         ZStack(alignment: .topTrailing) {
             // Fullscreen Metal Canvas
             PerspectiveMetalView(
-                snapshot: snapshot,
+                snapshot: state.currentSnapshot,
+                preloadedTexture: state.currentTexture,
+                preloadedBlurredTexture: state.currentBlurredTexture,
                 calibratorImage: state.menuImage,
                 showCalibrator: state.showCalibrator,
                 clockImage: state.clockImage,
@@ -1265,6 +1277,7 @@ private struct FullscreenPerspectiveContainer: View {
                 sensor: sensor,
                 fallbackAngle: sensor.currentAngle,
                 lookahead: state.lookaheadTime,
+                activationCount: state.activationCount,
                 keystoneStrength: state.keystoneStrength,
                 stretchBalance: state.stretchBalance,
                 lowAngleCompensation: state.lowAngleCompensation,
@@ -1296,13 +1309,12 @@ private struct FullscreenPerspectiveContainer: View {
         .animation(.easeInOut(duration: 0.2), value: state.showHUD)
         .onAppear {
             state.currentLidAngle = sensor.displayAngle
-            state.requestRender()
+            if state.showCalibrator {
+                state.requestRender()
+            }
             if state.isClockActive {
                 state.requestClockRender()
             }
-        }
-        .onChange(of: sensor.displayAngle) { newAngle in
-            state.currentLidAngle = newAngle
         }
     }
 
@@ -1333,16 +1345,21 @@ private struct FullscreenPerspectiveContainer: View {
 // MARK: - External Monitor Container
 private struct ExternalMonitorContainer: View {
     let snapshot: CGImage
-    @ObservedObject var sensor: LidSensor
+    var preloadedTexture: MTLTexture? = nil
+    var preloadedBlurredTexture: MTLTexture? = nil
+    let sensor: LidSensor
     @ObservedObject var controller: FullscreenOverlayController
     var onFirstFrame: (() -> Void)? = nil
 
     var body: some View {
         ExternalDisplayMetalView(
             snapshot: snapshot,
+            preloadedTexture: preloadedTexture,
+            preloadedBlurredTexture: preloadedBlurredTexture,
             sensor: sensor,
             fallbackAngle: sensor.currentAngle,
             lookahead: controller.viewState.lookaheadTime,
+            activationCount: controller.viewState.activationCount,
             maxZoomOut: controller.externalZoomOut,
             maxBlur: controller.externalBlur,
             maxDarken: controller.externalDarken,

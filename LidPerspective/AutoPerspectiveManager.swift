@@ -92,6 +92,7 @@ final class AutoPerspectiveManager: ObservableObject {
             return String(format: "%.1fs", autoSettleDelay)
         }
     }
+
     @Published var isArmed: Bool = false
     @Published var isCapturing: Bool = false
     @Published var statusDescription: String = "Initializing..."
@@ -225,6 +226,19 @@ final class AutoPerspectiveManager: ObservableObject {
             }
             lastSettledAngle = nil
             statusDescription = "Armed — Close lid (<90°) to activate"
+
+            // Pre-warm the builtin overlay window once so show() is 0ms
+            overlayController.prepareBuiltinWindow(sensor: sensor)
+
+            // Proactive capture when closing towards 90° or within pre-trigger range
+            if angle <= 112.0 {
+                let isClosing = sensor.latestVelocity < -0.3 || angle < 95.0
+                if isClosing || !captureManager.isFresh {
+                    captureManager.precapture()
+                }
+            } else if angle > 115.0 {
+                captureManager.cancelPrecapture()
+            }
         } else if angle < closeThreshold && angle >= minUsableAngle {
             if isArmed {
                 isArmed = false
@@ -234,7 +248,7 @@ final class AutoPerspectiveManager: ObservableObject {
                 // Screen was settled at a low angle. Check if user adjusts the lid again!
                 let velocity = abs(sensor.latestVelocity)
                 let angleDelta = abs(angle - settledAngle)
-                if velocity > 2.2 || angleDelta > 1.5 {
+                if velocity > 1.4 || angleDelta > 0.8 {
                     // Lid adjustment detected! Reactivate perspective mode
                     lastSettledAngle = nil
                     triggerPerspective()
@@ -346,10 +360,32 @@ final class AutoPerspectiveManager: ObservableObject {
             }
             return
         }
-        isCapturing = true
+
         cancelAllDwellTimers()
         dwellReferenceAngle = sensor.displayAngle
-        statusDescription = "Lid closing detected (<90°) — Capturing screen..."
+
+        // FAST PATH: If warm snapshots are already in memory, display IMMEDIATELY on this exact stack frame!
+        if let immediateSnapshots = captureManager.getImmediateSnapshots() {
+            self.overlayController.show(snapshots: immediateSnapshots, sensor: self.sensor, showCalibrator: showCalibrator) { [weak self] in
+                self?.handleOverlayDismissed()
+            }
+            self.statusDescription = "Perspective active"
+
+            if self.isAutoSettleEnabled && self.autoSettleDelay > 0 && !showCalibrator {
+                self.scheduleBuiltinDwellTimer()
+            } else if self.isClockModeEnabled && !showCalibrator {
+                self.scheduleClockTimer()
+            }
+            if immediateSnapshots.hasExternalSnapshots && self.overlayController.isExternalAnimationEnabled {
+                self.scheduleExternalDwellTimer()
+            }
+
+            return
+        }
+
+        // COLD PATH: If no warm snapshot exists, capture asynchronously
+        isCapturing = true
+        statusDescription = "Activating perspective..."
 
         Task { [weak self] in
             guard let self = self else { return }
@@ -404,6 +440,7 @@ final class AutoPerspectiveManager: ObservableObject {
     private func handleAutoModeToggled() {
         cancelAllDwellTimers()
         overlayController.deactivateClockMode()
+        captureManager.cancelPrecapture()
         if !isAutoModeEnabled {
             statusDescription = "Automatic mode disabled"
         } else {
