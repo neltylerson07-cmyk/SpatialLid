@@ -27,7 +27,18 @@ struct LidPerspectiveApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        // Background Menu Bar Extra (Persistent agent in macOS menu bar)
+        MenuBarExtra("LidPerspective", systemImage: "laptopcomputer.and.arrow.down") {
+            MenuBarMenuView(
+                sensor: sensor,
+                autoManager: autoManager,
+                overlayController: overlayController,
+                bootstrap: bootstrap
+            )
+        }
+
+        // Auxiliary Settings Window (Openable from Menu Bar or on launch)
+        WindowGroup("LidPerspective Settings", id: "settings") {
             ContentView(
                 sensor: sensor,
                 captureManager: captureManager,
@@ -40,6 +51,68 @@ struct LidPerspectiveApp: App {
     }
 }
 
+// MARK: - Menu Bar View (Agent Interface)
+struct MenuBarMenuView: View {
+    @ObservedObject var sensor: LidSensor
+    @ObservedObject var autoManager: AutoPerspectiveManager
+    @ObservedObject var overlayController: FullscreenOverlayController
+    @ObservedObject var bootstrap: AppBootstrap
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("LidPerspective Agent")
+                .font(.headline)
+
+            Text(String(format: "Hinge Angle: %.1f° (%.1f°/s)", sensor.displayAngle, sensor.currentVelocity))
+                .font(.caption)
+
+            Text("Status: \(autoManager.statusDescription)")
+                .font(.caption2)
+
+            Divider()
+
+            Button {
+                autoManager.triggerPerspective(pinSettings: true)
+            } label: {
+                Label("Open 45° Calibrator & Warped Menu", systemImage: "slider.horizontal.2.square.badge.arrow.down")
+            }
+            .disabled(autoManager.isCapturing || overlayController.isShowing)
+
+            Button {
+                autoManager.triggerPerspective(pinSettings: false)
+            } label: {
+                Label("Enter Perspective Mode (Manual)", systemImage: "play.fill")
+            }
+            .disabled(autoManager.isCapturing || overlayController.isShowing)
+
+            Divider()
+
+            Toggle("Automatic Perspective (<90°)", isOn: $autoManager.isAutoModeEnabled)
+            Toggle("Auto-Settle Below 90°", isOn: $autoManager.isAutoSettleEnabled)
+
+            Divider()
+
+            Button {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "settings")
+            } label: {
+                Label("Open Settings & Diagnostics Window...", systemImage: "gearshape")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                NSApp.terminate(nil)
+            } label: {
+                Label("Quit LidPerspective", systemImage: "power")
+            }
+            .keyboardShortcut("q", modifiers: .command)
+        }
+    }
+}
+
+// MARK: - Main Settings & Diagnostics Window
 struct ContentView: View {
     @ObservedObject var sensor: LidSensor
     @ObservedObject var captureManager: ScreenCaptureManager
@@ -47,141 +120,138 @@ struct ContentView: View {
     @ObservedObject var overlayController: FullscreenOverlayController
     @ObservedObject var autoManager: AutoPerspectiveManager
 
-    @State private var isRunningDiagnostics = false
-    @State private var diagnosticMessage: String?
+    @State private var isRunningDiagnostics: Bool = false
+    @State private var diagnosticMessage: String? = nil
 
     var body: some View {
-        VStack(spacing: 18) {
-            // Header
-            VStack(spacing: 6) {
+        VStack(spacing: 20) {
+            // Header with status indicator
+            HStack(spacing: 12) {
                 Image(systemName: "laptopcomputer.and.arrow.down")
-                    .font(.system(size: 40))
+                    .font(.system(size: 32))
                     .foregroundStyle(.tint)
 
-                Text("Lid Perspective")
-                    .font(.title2)
-                    .bold()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("LidPerspective")
+                        .font(.title2.bold())
+                    Text("Background Agent & 45° Holographic Overlay")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
-                Text("Real-time perspective warping driven by MacBook lid angle")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                Spacer()
+
+                // Armed status badge
+                Circle()
+                    .fill(statusIndicatorColor)
+                    .frame(width: 12, height: 12)
             }
 
             Divider()
 
-            // Sensor readout card
-            VStack(spacing: 8) {
+            // Sensor Readings Box
+            VStack(spacing: 10) {
                 HStack {
-                    Label("Lid Angle", systemImage: "angle")
-                        .font(.headline)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(String(format: "%.1f°", sensor.displayAngle))
-                            .font(.system(.title3, design: .monospaced))
-                            .bold()
-                            .foregroundStyle(.tint)
-                        Text(String(format: "%+.0f°/s", sensor.displayVelocity))
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                ProgressView(value: min(max(sensor.displayAngle, 0), 180), total: 180)
-                    .tint(.blue)
-
-                HStack {
-                    Text("Closed (0°)")
-                        .font(.caption2)
+                    Text("Lid Hinge Angle")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("90°")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("Flat (180°)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Text(String(format: "%.1f°", sensor.displayAngle))
+                        .font(.system(.title3, design: .monospaced).bold())
                 }
-            }
-            .padding()
-            .background(.quaternary.opacity(0.5))
-            .cornerRadius(10)
-
-            // Automatic Detection card
-            VStack(spacing: 12) {
-                HStack {
-                    Label("Automatic Perspective", systemImage: "bolt.badge.automatic.fill")
-                        .font(.headline)
-                    Spacer()
-                    Toggle("", isOn: $autoManager.isAutoModeEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
-
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(statusIndicatorColor)
-                        .frame(width: 8, height: 8)
-
-                    Text(autoManager.statusDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    if autoManager.isArmed && autoManager.isAutoModeEnabled {
-                        Text("< 90° trigger")
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.15))
-                            .foregroundStyle(.green)
-                            .cornerRadius(4)
-                    }
-                }
-
-                Divider()
 
                 HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Auto-Return Below 90°")
-                            .font(.subheadline)
-                        Text("Unwarps to desktop when lid stops moving for 1s")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("Angular Velocity")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                     Spacer()
-                    Toggle("", isOn: $autoManager.isAutoSettleEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
+                    Text(String(format: "%+.1f°/s", sensor.currentVelocity))
+                        .font(.system(.body, design: .monospaced))
+                }
+
+                HStack {
+                    Text("Sensor Status")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(sensor.isAvailable ? "Connected (IOHID)" : "Simulation Mode")
+                        .font(.caption.bold())
+                        .foregroundStyle(sensor.isAvailable ? .green : .orange)
                 }
             }
             .padding()
             .background(.quaternary.opacity(0.4))
             .cornerRadius(10)
 
-            // Manual trigger action button
-            Button {
-                autoManager.triggerPerspective()
-            } label: {
-                HStack {
-                    if autoManager.isCapturing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .padding(.trailing, 4)
-                        Text("Capturing Screen...")
-                    } else {
-                        Image(systemName: "play.fill")
-                        Text("Enter Perspective Mode (Manual)")
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
+            // Automation Settings
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Enable Automatic Perspective", isOn: $autoManager.isAutoModeEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("Automatically takes a screenshot and engages perspective view when the lid passes below 90°.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Auto-Return to Usable Desktop", isOn: $autoManager.isAutoSettleEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("When the lid is paused below 90° for >1 second, smoothly unwarps and fades out back to the interactive desktop.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(autoManager.isCapturing || overlayController.isShowing)
+            .padding()
+            .background(.quaternary.opacity(0.4))
+            .cornerRadius(10)
+
+            // Automation Status
+            HStack {
+                Text("Automation Status:")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Text(autoManager.statusDescription)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                Spacer()
+            }
+            .padding(.horizontal, 4)
+
+            // Primary Actions: 45° Calibrator & Manual Mode
+            VStack(spacing: 10) {
+                Button {
+                    autoManager.triggerPerspective(pinSettings: true)
+                } label: {
+                    HStack {
+                        Image(systemName: "slider.horizontal.2.square.badge.arrow.down")
+                        Text("Launch 45° Holographic Calibrator")
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(autoManager.isCapturing || overlayController.isShowing)
+
+                Button {
+                    autoManager.triggerPerspective(pinSettings: false)
+                } label: {
+                    HStack {
+                        if autoManager.isCapturing {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(.trailing, 4)
+                            Text("Capturing Screen...")
+                        } else {
+                            Image(systemName: "play.fill")
+                            Text("Enter Perspective Mode (Manual)")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(autoManager.isCapturing || overlayController.isShowing)
+            }
 
             // Secondary actions
             HStack(spacing: 12) {
@@ -213,16 +283,16 @@ struct ContentView: View {
             // Instructions footer
             VStack(alignment: .leading, spacing: 4) {
                 Label("Closing lid (<90°) captures screen and warps in real time", systemImage: "sparkles")
+                Label("Tilt screen to 45° to reveal the holographic warped settings menu", systemImage: "slider.horizontal.2.square.badge.arrow.down")
                 Label("Stopping movement (<90°) unwarps and returns to usable desktop after 1s", systemImage: "arrow.triangle.2.circlepath")
                 Label("Open lid past 90° or press ESC to exit", systemImage: "info.circle")
-                Label("Toggle 'Tune Parameters' (H) in overlay to adjust keystone", systemImage: "slider.horizontal.3")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(24)
-        .frame(width: 400)
+        .frame(width: 440)
     }
 
     private var statusIndicatorColor: Color {
