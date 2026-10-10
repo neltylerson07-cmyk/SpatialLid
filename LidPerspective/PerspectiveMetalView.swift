@@ -5,9 +5,11 @@ import MetalPerformanceShaders
 
 struct PerspectiveMetalView: NSViewRepresentable {
     var snapshot: CGImage?
+    var calibratorImage: CGImage? = nil
+    var showCalibrator: Bool = false
     var sensor: LidSensor? = nil
     var fallbackAngle: Double = 90.0
-    var lookahead: Double = 0.18
+    var lookahead: Double = 0.22
     var keystoneStrength: Float
     var stretchBalance: Float
     var keyboardReflection: Float = 0.44
@@ -52,6 +54,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         context.coordinator.sensor = sensor
         context.coordinator.lookahead = lookahead
         context.coordinator.onSettleCompleted = onSettleCompleted
+        context.coordinator.showCalibrator = showCalibrator
 
         if isSettling && !context.coordinator.isSettling {
             context.coordinator.startSettling()
@@ -61,6 +64,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
 
         context.coordinator.updateParameters(
             snapshot: snapshot,
+            calibratorImage: calibratorImage,
             targetAngle: fallbackAngle,
             keystone: keystoneStrength,
             balance: stretchBalance,
@@ -81,7 +85,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
     final class Coordinator: NSObject, MTKViewDelegate {
         var onFirstFrame: (() -> Void)?
         var sensor: LidSensor?
-        var lookahead: Double = 0.18
+        var lookahead: Double = 0.22
         private var hasFiredFirstFrame = false
 
         private var device: MTLDevice?
@@ -89,10 +93,14 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var pipelineState: MTLRenderPipelineState?
         private var texture: MTLTexture?
         private var blurredTexture: MTLTexture?
+        private var calibratorTexture: MTLTexture?
+        private var defaultCalibratorTexture: MTLTexture?
         private var textureSampler: MTLSamplerState?
 
         // Track last loaded snapshot to prevent re-uploading every frame
         private var lastLoadedSnapshotID: CGImage?
+        private var lastLoadedCalibratorID: CGImage?
+        var showCalibrator: Bool = false
 
         // Smooth interpolation state
         private var targetAngle: Double = 90.0
@@ -127,6 +135,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
             var keyboardOffset: Float = -0.02
             var keyboardWidth: Float = 0.88
             var keyboardDepthBlur: Float = 0.30
+            var showCalibrator: Float = 0.0
         }
 
         override init() {
@@ -137,6 +146,22 @@ struct PerspectiveMetalView: NSViewRepresentable {
 
             buildPipeline(device: device)
             buildSampler(device: device)
+            buildDefaultCalibratorTexture(device: device)
+        }
+
+        private func buildDefaultCalibratorTexture(device: MTLDevice) {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: 1,
+                height: 1,
+                mipmapped: false
+            )
+            desc.usage = [.shaderRead]
+            if let dummy = device.makeTexture(descriptor: desc) {
+                var zero: UInt32 = 0
+                dummy.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 4)
+                self.defaultCalibratorTexture = dummy
+            }
         }
 
         func startSettling() {
@@ -174,6 +199,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
         
         func updateParameters(
             snapshot: CGImage?,
+            calibratorImage: CGImage?,
             targetAngle: Double,
             keystone: Float,
             balance: Float,
@@ -211,6 +237,63 @@ struct PerspectiveMetalView: NSViewRepresentable {
                     self.blurredTexture = makeBlurredTexture(from: sourceTexture, device: device, sigma: 40)
                 }
             }
+
+            if let calibImage = calibratorImage, calibImage !== lastLoadedCalibratorID, let device = self.device {
+                self.lastLoadedCalibratorID = calibImage
+                self.calibratorTexture = makeTexture(from: calibImage, device: device)
+            }
+        }
+
+        private func makeTexture(from cgImage: CGImage, device: MTLDevice) -> MTLTexture? {
+            let width = cgImage.width
+            let height = cgImage.height
+            guard width > 0, height > 0 else { return nil }
+
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            desc.usage = [.shaderRead]
+            guard let texture = device.makeTexture(descriptor: desc) else { return nil }
+
+            if let data = cgImage.dataProvider?.data,
+               let ptr = CFDataGetBytePtr(data),
+               cgImage.bitsPerPixel == 32 {
+                texture.replace(
+                    region: MTLRegionMake2D(0, 0, width, height),
+                    mipmapLevel: 0,
+                    withBytes: ptr,
+                    bytesPerRow: cgImage.bytesPerRow
+                )
+                return texture
+            }
+
+            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            var rawData = [UInt8](repeating: 0, count: width * height * 4)
+            let bytesPerRow = width * 4
+
+            guard let context = CGContext(
+                data: &rawData,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+            ) else {
+                return nil
+            }
+
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: rawData,
+                bytesPerRow: bytesPerRow
+            )
+            return texture
         }
 
         private func makeBlurredTexture(from source: MTLTexture, device: MTLDevice, sigma: Float) -> MTLTexture? {
@@ -295,13 +378,16 @@ struct PerspectiveMetalView: NSViewRepresentable {
                 keyboardBacklight: self.keyboardBacklight,
                 keyboardOffset: self.keyboardOffset,
                 keyboardWidth: self.keyboardWidth,
-                keyboardDepthBlur: self.keyboardDepthBlur
+                keyboardDepthBlur: self.keyboardDepthBlur,
+                showCalibrator: (self.showCalibrator && self.calibratorTexture != nil) ? 1.0 : 0.0
             )
 
             encoder.setRenderPipelineState(pipelineState)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PerspectiveUniforms>.stride, index: 0)
             encoder.setFragmentTexture(texture, index: 0)
             encoder.setFragmentTexture(blurredTexture, index: 1)
+            let calibTex = (self.showCalibrator ? self.calibratorTexture : nil) ?? self.defaultCalibratorTexture
+            encoder.setFragmentTexture(calibTex, index: 2)
             encoder.setFragmentSamplerState(textureSampler, index: 0)
 
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)

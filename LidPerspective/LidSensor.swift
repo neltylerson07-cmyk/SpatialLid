@@ -60,9 +60,14 @@ final class LidSensor: ObservableObject {
     // Published for UI text label and automatic angle tracking
     @Published var displayAngle: Double = 90.0
     @Published var displayVelocity: Double = 0.0
+    @Published var isAvailable: Bool = false
 
     var currentAngle: Double {
         displayAngle
+    }
+
+    var currentVelocity: Double {
+        displayVelocity
     }
 
     var onAngleChanged: ((Double) -> Void)?
@@ -105,6 +110,7 @@ final class LidSensor: ObservableObject {
         guard openStatus == kIOReturnSuccess else { return }
 
         locateLidDevice()
+        isAvailable = (lidDevice != nil)
         startLoop()
     }
 
@@ -125,6 +131,9 @@ final class LidSensor: ObservableObject {
 
             if status == kIOReturnSuccess && reportLength >= 3 {
                 self.lidDevice = device
+                DispatchQueue.main.async { [weak self] in
+                    self?.isAvailable = true
+                }
                 return
             }
         }

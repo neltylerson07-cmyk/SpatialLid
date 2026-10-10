@@ -72,19 +72,9 @@ struct MenuBarMenuView: View {
 
             Divider()
 
-            Button {
-                autoManager.triggerPerspective(pinSettings: true)
-            } label: {
-                Label("Open 45° Calibrator & Warped Menu", systemImage: "slider.horizontal.2.square.badge.arrow.down")
-            }
-            .disabled(autoManager.isCapturing || overlayController.isShowing)
-
-            Button {
-                autoManager.triggerPerspective(pinSettings: false)
-            } label: {
-                Label("Enter Perspective Mode (Manual)", systemImage: "play.fill")
-            }
-            .disabled(autoManager.isCapturing || overlayController.isShowing)
+            Toggle("Automatic Perspective (<90°)", isOn: $autoManager.isAutoModeEnabled)
+            Toggle("Auto-Settle Below 90°", isOn: $autoManager.isAutoSettleEnabled)
+            Toggle("Simulated Keyboard Reflection", isOn: overlayController.keyboardReflectionBinding)
 
             Divider()
 
@@ -122,6 +112,7 @@ struct ContentView: View {
 
     @State private var isRunningDiagnostics: Bool = false
     @State private var diagnosticMessage: String? = nil
+    @State private var keyMonitor: Any? = nil
 
     var body: some View {
         VStack(spacing: 20) {
@@ -132,9 +123,9 @@ struct ContentView: View {
                     .foregroundStyle(.tint)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("LidPerspective")
+                    Text("GlassBook")
                         .font(.title2.bold())
-                    Text("Background Agent & 45° Holographic Overlay")
+                    Text("Simulates a glass door effect when the lid is tilted below 90 degrees")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -157,7 +148,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(String(format: "%.1f°", sensor.displayAngle))
-                        .font(.system(.title3, design: .monospaced).bold())
+                        .font(.title3.weight(.bold).monospacedDigit())
                 }
 
                 HStack {
@@ -166,7 +157,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(String(format: "%+.1f°/s", sensor.currentVelocity))
-                        .font(.system(.body, design: .monospaced))
+                        .font(.body.monospacedDigit())
                 }
 
                 HStack {
@@ -198,6 +189,13 @@ struct ContentView: View {
                 Text("When the lid is paused below 90° for >1 second, smoothly unwarps and fades out back to the interactive desktop.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle("Simulated Keyboard Reflection", isOn: overlayController.keyboardReflectionBinding)
+                    .font(.body.weight(.medium))
+
+                Text("Simulates specular laptop keyboard reflection on the screen glass between 45° and 90°.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding()
             .background(.quaternary.opacity(0.4))
@@ -214,44 +212,6 @@ struct ContentView: View {
                 Spacer()
             }
             .padding(.horizontal, 4)
-
-            // Primary Actions: 45° Calibrator & Manual Mode
-            VStack(spacing: 10) {
-                Button {
-                    autoManager.triggerPerspective(pinSettings: true)
-                } label: {
-                    HStack {
-                        Image(systemName: "slider.horizontal.2.square.badge.arrow.down")
-                        Text("Launch 45° Holographic Calibrator")
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(autoManager.isCapturing || overlayController.isShowing)
-
-                Button {
-                    autoManager.triggerPerspective(pinSettings: false)
-                } label: {
-                    HStack {
-                        if autoManager.isCapturing {
-                            ProgressView()
-                                .controlSize(.small)
-                                .padding(.trailing, 4)
-                            Text("Capturing Screen...")
-                        } else {
-                            Image(systemName: "play.fill")
-                            Text("Enter Perspective Mode (Manual)")
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-                .disabled(autoManager.isCapturing || overlayController.isShowing)
-            }
 
             // Secondary actions
             HStack(spacing: 12) {
@@ -283,8 +243,9 @@ struct ContentView: View {
             // Instructions footer
             VStack(alignment: .leading, spacing: 4) {
                 Label("Closing lid (<90°) captures screen and warps in real time", systemImage: "sparkles")
-                Label("Tilt screen to 45° to reveal the holographic warped settings menu", systemImage: "slider.horizontal.2.square.badge.arrow.down")
-                Label("Stopping movement (<90°) unwarps and returns to usable desktop after 1s", systemImage: "arrow.triangle.2.circlepath")
+                Label("When lid is tilted, press 'C' for Calibrator or 'K' to toggle Keyboard", systemImage: "slider.horizontal.2.square.badge.arrow.down")
+                Label("Use [↑/↓] and [←/→] to navigate and tune perspective parameters", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                Label("Stopping movement (<90°) unwarps and returns to desktop after 1s", systemImage: "arrow.triangle.2.circlepath")
                 Label("Open lid past 90° or press ESC to exit", systemImage: "info.circle")
             }
             .font(.caption)
@@ -293,6 +254,101 @@ struct ContentView: View {
         }
         .padding(24)
         .frame(width: 440)
+        .background(WindowAccessor { window in
+            window.title = "LidPerspective Settings"
+            window.identifier = NSUserInterfaceItemIdentifier("settings")
+            overlayController.viewState.settingsWindow = window
+            overlayController.viewState.isSettingsWindowOpen = true
+            overlayController.viewState.isSettingsWindowFocused = true
+        })
+        .onAppear {
+            overlayController.viewState.isSettingsWindowOpen = true
+            setupKeyMonitor()
+        }
+        .onDisappear {
+            if let monitor = keyMonitor {
+                NSEvent.removeMonitor(monitor)
+                keyMonitor = nil
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
+            if let window = notification.object as? NSWindow,
+               window == overlayController.viewState.settingsWindow || window.title.contains("Settings") || window.identifier?.rawValue == "settings" {
+                overlayController.viewState.isSettingsWindowFocused = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { notification in
+            if let window = notification.object as? NSWindow,
+               window == overlayController.viewState.settingsWindow || window.title.contains("Settings") || window.identifier?.rawValue == "settings" {
+                overlayController.viewState.isSettingsWindowFocused = false
+            }
+        }
+        .onKeyPress(KeyEquivalent("c")) {
+            if handleKeyPress("c") { return .handled }
+            return .ignored
+        }
+        .onKeyPress(KeyEquivalent("C")) {
+            if handleKeyPress("c") { return .handled }
+            return .ignored
+        }
+        .onKeyPress(KeyEquivalent("k")) {
+            if handleKeyPress("k") { return .handled }
+            return .ignored
+        }
+        .onKeyPress(KeyEquivalent("K")) {
+            if handleKeyPress("k") { return .handled }
+            return .ignored
+        }
+    }
+
+    private func setupKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let char = event.charactersIgnoringModifiers?.lowercased()
+            if char == "c" {
+                if sensor.displayAngle < 90.0 {
+                    if overlayController.isShowing {
+                        overlayController.viewState.showCalibrator.toggle()
+                        if overlayController.viewState.showCalibrator {
+                            overlayController.viewState.requestRender()
+                        }
+                    } else {
+                        autoManager.triggerPerspective(showCalibrator: true)
+                    }
+                    return nil
+                }
+            } else if char == "k" {
+                overlayController.viewState.isKeyboardReflectionEnabled.toggle()
+                if overlayController.viewState.showCalibrator {
+                    overlayController.viewState.requestRender()
+                }
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func handleKeyPress(_ key: String) -> Bool {
+        if key.lowercased() == "c" {
+            if sensor.displayAngle < 90.0 {
+                if overlayController.isShowing {
+                    overlayController.viewState.showCalibrator.toggle()
+                    if overlayController.viewState.showCalibrator {
+                        overlayController.viewState.requestRender()
+                    }
+                } else {
+                    autoManager.triggerPerspective(showCalibrator: true)
+                }
+                return true
+            }
+        } else if key.lowercased() == "k" {
+            overlayController.viewState.isKeyboardReflectionEnabled.toggle()
+            if overlayController.viewState.showCalibrator {
+                overlayController.viewState.requestRender()
+            }
+            return true
+        }
+        return false
     }
 
     private var statusIndicatorColor: Color {
@@ -319,3 +375,27 @@ struct ContentView: View {
         }
     }
 }
+
+// MARK: - Window Accessor Helper
+private struct WindowAccessor: NSViewRepresentable {
+    let callback: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            if let window = view.window {
+                callback(window)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let window = nsView.window {
+                callback(window)
+            }
+        }
+    }
+}
+

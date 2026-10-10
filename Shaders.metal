@@ -19,6 +19,7 @@ struct PerspectiveUniforms {
     float keyboardOffset;     // Vertical position shift to bring keys right to bottom edge (default 0.00)
     float keyboardWidth;      // Width of the keyboard well (0.60 to 1.00, default 0.94)
     float keyboardDepthBlur;  // Optical depth-of-field blur gradient between closest & furthest row (default 1.0)
+    float showCalibrator;     // 1.0 if calibrator is active, 0.0 otherwise
 };
 
 vertex RasterizerData vertex_main(uint vertexID [[vertex_id]]) {
@@ -227,8 +228,6 @@ static float4 sampleKeyboardReflection(float2 finalUV,
     
     // Normalized distance on the ground plane (0.0 at hinge, 1.0 at max reach)
     float normY = vY / maxReach;
-    float perspectiveCompression = 1.0f + 0.85f * normY;
-    float groundZ = (vY * (0.80f / tilt)) * perspectiveCompression;
 
     // Linear keystone taper across the angled plane (straight lines remain straight)
     float taper = 1.0f + normY * (0.45f * tilt);
@@ -459,6 +458,7 @@ static float4 sampleKeyboardReflection(float2 finalUV,
 fragment float4 fragment_main(RasterizerData in [[stage_in]],
                               texture2d<float> screenTexture [[texture(0)]],
                               texture2d<float> blurredTexture [[texture(1)]],
+                              texture2d<float> calibratorTexture [[texture(2)]],
                               sampler textureSampler [[sampler(0)]],
                               constant PerspectiveUniforms &uniforms [[buffer(0)]]) {
     float2 uv = in.texCoords;
@@ -473,7 +473,12 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
 
     // Upright at 90° or wider, or settled: render flat and completely sharp edge-to-edge
     if (delta <= 0.0001f || uniforms.settleProgress >= 0.999f) {
-        return screenTexture.sample(textureSampler, uv);
+        float4 base = screenTexture.sample(textureSampler, uv);
+        if (uniforms.showCalibrator > 0.5f) {
+            float4 calib = calibratorTexture.sample(textureSampler, uv);
+            base.rgb = base.rgb * (1.0f - calib.a) + calib.rgb;
+        }
+        return base;
     }
 
     // Smooth transition envelope as angle begins closing (smoothly ramps from 0.0 to 1.0 by ~86°)
@@ -555,7 +560,15 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
         frameColor.rgb = frameColor.rgb * (1.0f - 0.25f * refAlpha) + kbReflect.rgb * refAlpha;
     }
 
-    // 7. Seamless Silhouette Edge Mask
+    // 7. Calibrator Overlay in Perspective (Direct surface projection)
+    if (uniforms.showCalibrator > 0.5f) {
+        if (finalUV.x >= 0.0f && finalUV.x <= 1.0f && finalUV.y >= 0.0f && finalUV.y <= 1.0f) {
+            float4 calib = calibratorTexture.sample(textureSampler, finalUV);
+            frameColor.rgb = frameColor.rgb * (1.0f - calib.a) + calib.rgb;
+        }
+    }
+
+    // 8. Seamless Silhouette Edge Mask
     // Only fall off into black outside the [0, 1] texture coordinates
     // At the bottom hinge (finalUV.y >= 1.0), the screen connects to the laptop base so it never clips into black
     float distLeft   = max(-finalUV.x, 0.0f);

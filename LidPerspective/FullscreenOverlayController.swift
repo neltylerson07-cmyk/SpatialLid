@@ -7,13 +7,26 @@ final class FullscreenOverlayController: ObservableObject {
     private var window: KeyCatchingWindow?
     @Published private(set) var isShowing: Bool = false
     private var onDismissal: (() -> Void)?
-    let viewState = OverlayViewState()
+    @Published var viewState = OverlayViewState()
+
+    var keyboardReflectionBinding: Binding<Bool> {
+        Binding(
+            get: { self.viewState.isKeyboardReflectionEnabled },
+            set: { [weak self] newValue in
+                guard let self = self else { return }
+                self.viewState.isKeyboardReflectionEnabled = newValue
+                if self.viewState.showCalibrator {
+                    self.viewState.requestRender()
+                }
+            }
+        )
+    }
 
     var isSettling: Bool {
         viewState.isSettling
     }
 
-    func show(snapshot: CGImage, sensor: LidSensor, pinSettingsMenu: Bool = false, onDismiss: (() -> Void)? = nil) {
+    func show(snapshot: CGImage, sensor: LidSensor, showCalibrator: Bool = false, onDismiss: (() -> Void)? = nil) {
         if window != nil {
             dismiss()
         }
@@ -24,7 +37,7 @@ final class FullscreenOverlayController: ObservableObject {
         // Reset settle state when showing fresh overlay
         viewState.isSettling = false
         viewState.onSettleCompleted = nil
-        viewState.isMenuPinned = pinSettingsMenu
+        viewState.showCalibrator = showCalibrator
         viewState.screenSize = screen.frame.size
         viewState.requestRender()
 
@@ -51,28 +64,49 @@ final class FullscreenOverlayController: ObservableObject {
             self?.viewState.showHUD.toggle()
         }
 
+        overlayWindow.onToggleCalibrator = { [weak self] in
+            guard let self = self else { return }
+            guard self.viewState.isSettingsWindowAvailable else { return }
+            if !self.viewState.showCalibrator && sensor.displayAngle >= 90.0 {
+                return
+            }
+            self.viewState.showCalibrator.toggle()
+            if self.viewState.showCalibrator {
+                self.viewState.requestRender()
+            }
+        }
+
         overlayWindow.onArrowUp = { [weak self] in
-            self?.viewState.previousSetting()
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.previousSetting()
         }
 
         overlayWindow.onArrowDown = { [weak self] in
-            self?.viewState.nextSetting()
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.nextSetting()
         }
 
         overlayWindow.onArrowLeft = { [weak self] in
-            self?.viewState.adjustSelectedSetting(by: -1)
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.adjustSelectedSetting(by: -1)
         }
 
         overlayWindow.onArrowRight = { [weak self] in
-            self?.viewState.adjustSelectedSetting(by: 1)
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.adjustSelectedSetting(by: 1)
         }
 
         overlayWindow.onReset = { [weak self] in
-            self?.viewState.resetToDefaults()
+            guard let self = self, self.viewState.showCalibrator else { return }
+            self.viewState.resetToDefaults()
         }
 
-        overlayWindow.onTogglePin = { [weak self] in
-            self?.viewState.isMenuPinned.toggle()
+        overlayWindow.onToggleKeyboard = { [weak self] in
+            guard let self = self else { return }
+            self.viewState.isKeyboardReflectionEnabled.toggle()
+            if self.viewState.showCalibrator {
+                self.viewState.requestRender()
+            }
         }
 
         // Set to ScreenSaver level: sits higher than Dock, Menu Bar, and popups
@@ -159,7 +193,7 @@ final class FullscreenOverlayController: ObservableObject {
     }
 
     /// Immediate dismissal (e.g. lid opened past 90° or ESC pressed)
-    func dismiss() {
+    func dismiss(completion: (() -> Void)? = nil) {
         cancelSettling()
         guard let activeWindow = window else { return }
         window = nil
@@ -219,9 +253,32 @@ enum TunableSetting: Int, CaseIterable, Identifiable {
 @MainActor
 final class OverlayViewState: ObservableObject {
     @Published var showHUD: Bool = false
+    @Published var showCalibrator: Bool = false
+    // Window Focus / State tracking for Calibrator activation guard
+    @Published var isSettingsWindowOpen: Bool = false
+    @Published var isSettingsWindowFocused: Bool = false
+    weak var settingsWindow: NSWindow? = nil {
+        didSet {
+            guard let window = settingsWindow else { return }
+            isSettingsWindowOpen = true
+            isSettingsWindowFocused = true
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.isSettingsWindowOpen = false
+                    self?.isSettingsWindowFocused = false
+                    self?.settingsWindow = nil
+                }
+            }
+        }
+    }
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
-    @Published var lookaheadTime: Double = 0.18
+    @Published var lookaheadTime: Double = 0.22
+    @Published var isKeyboardReflectionEnabled: Bool = true
     @Published var keyboardReflection: Float = 0.44
     @Published var keyboardTilt: Float = 0.40
     @Published var keyboardReach: Float = 0.38
@@ -230,12 +287,24 @@ final class OverlayViewState: ObservableObject {
     @Published var keyboardWidth: Float = 0.88
     @Published var keyboardDepthBlur: Float = 0.30
 
-    // 45° Holographic Menu State
+    // Calibrator State
     @Published var selectedSettingIndex: Int = 0
-    @Published var isMenuPinned: Bool = false
-    @Published var menuAlpha: Float = 0.0
     @Published var menuImage: CGImage? = nil
     var screenSize: CGSize = CGSize(width: 1920, height: 1080)
+
+    var isSettingsWindowAvailable: Bool {
+        if isSettingsWindowOpen || isSettingsWindowFocused {
+            return true
+        }
+        if let window = settingsWindow {
+            return window.isVisible || window.windowNumber > 0
+        }
+        return NSApp.windows.contains { window in
+            let title = window.title
+            let id = window.identifier?.rawValue ?? ""
+            return (title.contains("Settings") || id.contains("settings")) && (window.isVisible || window.windowNumber > 0)
+        }
+    }
 
     // Settle animation state
     @Published var isSettling: Bool = false
@@ -264,7 +333,13 @@ final class OverlayViewState: ObservableObject {
         case .lookahead:
             lookaheadTime = min(max(lookaheadTime + Double(direction) * 0.02, 0.0), 0.5)
         case .keyboardReflection:
-            keyboardReflection = min(max(keyboardReflection + step * 0.02, 0.0), 1.0)
+            if direction > 0 && !isKeyboardReflectionEnabled {
+                isKeyboardReflectionEnabled = true
+            } else if direction < 0 && keyboardReflection <= 0.04 {
+                isKeyboardReflectionEnabled = false
+            } else {
+                keyboardReflection = min(max(keyboardReflection + step * 0.02, 0.0), 1.0)
+            }
         case .keyboardTilt:
             keyboardTilt = min(max(keyboardTilt + step * 0.05, 0.15), 2.0)
         case .keyboardReach:
@@ -284,7 +359,8 @@ final class OverlayViewState: ObservableObject {
     func resetToDefaults() {
         keystoneStrength = 0.18
         stretchBalance = 0.56
-        lookaheadTime = 0.18
+        lookaheadTime = 0.22
+        isKeyboardReflectionEnabled = true
         keyboardReflection = 0.44
         keyboardTilt = 0.40
         keyboardReach = 0.38
@@ -295,11 +371,27 @@ final class OverlayViewState: ObservableObject {
         requestRender()
     }
 
+    private var appearanceSubscription: AnyCancellable?
+
+    init() {
+        if let app = NSApp {
+            appearanceSubscription = app.publisher(for: \.effectiveAppearance)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.requestRender()
+                }
+        }
+    }
+
     func requestRender() {
-        let view = WarpedSettingsCardContainer(state: self)
+        let isDarkMode = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let view = WarpedSettingsCardContainer(state: self, isDarkMode: isDarkMode)
+            .environment(\.colorScheme, isDarkMode ? .dark : .light)
             .frame(width: screenSize.width, height: screenSize.height)
         let renderer = ImageRenderer(content: view)
         renderer.scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        renderer.isOpaque = false
+        renderer.proposedSize = ProposedViewSize(width: screenSize.width, height: screenSize.height)
         if let cgImage = renderer.cgImage {
             self.menuImage = cgImage
         }
@@ -310,12 +402,13 @@ final class OverlayViewState: ObservableObject {
 private class KeyCatchingWindow: NSWindow {
     var onEscape: (() -> Void)?
     var onToggleHUD: (() -> Void)?
+    var onToggleCalibrator: (() -> Void)?
+    var onToggleKeyboard: (() -> Void)?
     var onArrowUp: (() -> Void)?
     var onArrowDown: (() -> Void)?
     var onArrowLeft: (() -> Void)?
     var onArrowRight: (() -> Void)?
     var onReset: (() -> Void)?
-    var onTogglePin: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -332,12 +425,19 @@ private class KeyCatchingWindow: NSWindow {
             onArrowLeft?()
         case 124: // Right Arrow
             onArrowRight?()
-        case 1: // 'S' key
-            onTogglePin?()
+        case 8: // 'C' key
+            onToggleCalibrator?()
+        case 40: // 'K' key
+            onToggleKeyboard?()
         case 15: // 'R' key
             onReset?()
         default:
-            if event.charactersIgnoringModifiers?.lowercased() == "h" {
+            let char = event.charactersIgnoringModifiers?.lowercased()
+            if char == "c" {
+                onToggleCalibrator?()
+            } else if char == "k" {
+                onToggleKeyboard?()
+            } else if char == "h" {
                 onToggleHUD?()
             } else {
                 super.keyDown(with: event)
@@ -356,23 +456,23 @@ private struct FullscreenPerspectiveContainer: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            // Fullscreen Metal Canvas with Warped Menu layer
+            // Fullscreen Metal Canvas
             PerspectiveMetalView(
                 snapshot: snapshot,
+                calibratorImage: state.menuImage,
+                showCalibrator: state.showCalibrator,
                 sensor: sensor,
                 fallbackAngle: sensor.currentAngle,
                 lookahead: state.lookaheadTime,
                 keystoneStrength: state.keystoneStrength,
                 stretchBalance: state.stretchBalance,
-                keyboardReflection: state.keyboardReflection,
+                keyboardReflection: state.isKeyboardReflectionEnabled ? state.keyboardReflection : 0.0,
                 keyboardTilt: state.keyboardTilt,
                 keyboardReach: state.keyboardReach,
                 keyboardBacklight: state.keyboardBacklight,
                 keyboardOffset: state.keyboardOffset,
                 keyboardWidth: state.keyboardWidth,
                 keyboardDepthBlur: state.keyboardDepthBlur,
-                menuImage: state.menuImage,
-                menuAlpha: state.menuAlpha,
                 isSettling: state.isSettling,
                 onSettleCompleted: {
                     state.onSettleCompleted?()
@@ -380,52 +480,6 @@ private struct FullscreenPerspectiveContainer: View {
                 onFirstFrame: onFirstFrame
             )
             .ignoresSafeArea()
-
-            // 45° Alignment / Navigation Guidance Banner (always visible at top)
-            VStack {
-                HStack(spacing: 12) {
-                    Circle()
-                        .fill(angleAlignmentColor)
-                        .frame(width: 10, height: 10)
-
-                    Text(guideBannerText)
-                        .font(.system(.subheadline, design: .rounded).bold())
-                        .foregroundStyle(.primary)
-
-                    Spacer()
-
-                    HStack(spacing: 8) {
-                        Text(String(format: "%.1f°", sensor.displayAngle))
-                            .font(.system(.subheadline, design: .monospaced).bold())
-                            .foregroundStyle(.cyan)
-
-                        Text("[S] Pin")
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(state.isMenuPinned ? Color.cyan.opacity(0.3) : Color.primary.opacity(0.1))
-                            .cornerRadius(5)
-
-                        Text("[ESC] Exit")
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.primary.opacity(0.1))
-                            .cornerRadius(5)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(Color.primary.opacity(0.15), lineWidth: 1))
-                .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
-                .padding(.top, 18)
-
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)
-            .transition(.move(edge: .top).combined(with: .opacity))
 
             // Traditional Floating Tweaker Panel (Optional fallback via 'H' key)
             if state.showHUD {
@@ -436,54 +490,7 @@ private struct FullscreenPerspectiveContainer: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.2), value: state.showHUD)
         .onAppear {
-            updateMenuAlpha(for: sensor.currentAngle)
             state.requestRender()
-        }
-        .onChange(of: sensor.displayAngle) { newAngle in
-            updateMenuAlpha(for: newAngle)
-        }
-    }
-
-    private func updateMenuAlpha(for angle: Double) {
-        if state.isMenuPinned {
-            state.menuAlpha = 1.0
-        } else {
-            let diff = abs(angle - 45.0)
-            if diff <= 4.0 {
-                state.menuAlpha = 1.0
-            } else if diff <= 8.0 {
-                state.menuAlpha = Float(max(0.0, 1.0 - ((diff - 4.0) / 4.0)))
-            } else {
-                state.menuAlpha = 0.0
-            }
-        }
-    }
-
-    private var isAtTargetAngle: Bool {
-        abs(sensor.displayAngle - 45.0) <= 4.0
-    }
-
-    private var angleAlignmentColor: Color {
-        if state.isMenuPinned {
-            return .cyan
-        } else if isAtTargetAngle {
-            return .green
-        } else if abs(sensor.displayAngle - 45.0) <= 8.0 {
-            return .orange
-        } else {
-            return .yellow
-        }
-    }
-
-    private var guideBannerText: String {
-        if state.isMenuPinned {
-            return "📌 Holographic Settings Pinned • [↑/↓] Select • [←/→] Adjust • [R] Reset"
-        } else if isAtTargetAngle {
-            return "✨ 45° Target Locked — Warped Settings Active • [↑/↓] Select • [←/→] Adjust"
-        } else if sensor.displayAngle > 45.0 {
-            return String(format: "📐 Tilt screen forward to 45° for Warped Settings (Current: %.1f°)", sensor.displayAngle)
-        } else {
-            return String(format: "📐 Open screen backward to 45° for Warped Settings (Current: %.1f°)", sensor.displayAngle)
         }
     }
 
@@ -498,7 +505,7 @@ private struct FullscreenPerspectiveContainer: View {
                     .buttonStyle(.borderless)
             }
             Divider()
-            Text("Press [H] to toggle this panel, or tilt to 45° for the holographic warped overlay.")
+            Text("Press [H] to toggle this panel, or press [C] when lid is tilted to show the perspective calibrator.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -514,96 +521,170 @@ private struct FullscreenPerspectiveContainer: View {
 // MARK: - Warped Settings Card (Rendered directly into Metal Texture)
 private struct WarpedSettingsCardContainer: View {
     @ObservedObject var state: OverlayViewState
+    var isDarkMode: Bool
 
     var body: some View {
         ZStack {
             // Transparent backdrop for entire screen canvas
             Color.clear
 
-            // Centered Holographic Settings Card
-            VStack(spacing: 16) {
-                // Header
+            // 8 Calibration Squares around the screen perimeter
+            calibrationSquares
+
+            // Centered Native Apple Settings Card
+            VStack(spacing: 14) {
+                // Header: macOS Settings / Inspector style
                 HStack(spacing: 12) {
-                    Image(systemName: "slider.horizontal.2.square.badge.arrow.down")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.cyan)
+                    // App / Tool icon in Apple squircle
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.accentColor.opacity(isDarkMode ? 0.25 : 0.15))
+                            .frame(width: 34, height: 34)
+
+                        Image(systemName: "slider.horizontal.2.square")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                    }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("PERSPECTIVE CALIBRATOR")
-                            .font(.system(size: 18, weight: .black, design: .monospaced))
-                            .foregroundStyle(.white)
+                        Text("Perspective Calibrator")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.primary)
 
-                        Text("45° Holographic Warped Overlay • Direct Surface Projection")
-                            .font(.system(size: 11, weight: .semibold, design: .default))
-                            .foregroundStyle(.cyan.opacity(0.85))
+                        Text("Tune the shader based on your distance and preference")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(Color.secondary)
                     }
 
                     Spacer()
 
-                    if state.isMenuPinned {
-                        Text("PINNED [S]")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.cyan.opacity(0.25))
-                            .foregroundStyle(.cyan)
-                            .cornerRadius(6)
+                    // Native status pill
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+
+                        Text("Active")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.secondary)
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(Color.primary.opacity(isDarkMode ? 0.08 : 0.05))
+                    )
                 }
-                .padding(.bottom, 4)
+                .padding(.bottom, 2)
 
                 Divider()
-                    .background(Color.cyan.opacity(0.3))
 
                 // Parameter rows
-                VStack(spacing: 8) {
+                VStack(spacing: 3) {
                     ForEach(TunableSetting.allCases) { setting in
                         SettingRow(
                             setting: setting,
                             isSelected: state.selectedSettingIndex == setting.rawValue,
                             valueText: formattedValue(for: setting),
-                            progress: progress(for: setting)
+                            progress: progress(for: setting),
+                            isDarkMode: isDarkMode
                         )
                     }
                 }
 
                 Divider()
-                    .background(Color.cyan.opacity(0.3))
 
-                // Keyboard controls hint footer
-                HStack {
-                    Text("[↑/↓] Select Parameter")
+                // Native Apple Keyboard Shortcut Keycaps Footer
+                HStack(spacing: 12) {
+                    KeycapHint(keys: ["↑", "↓"], label: "Select", isDarkMode: isDarkMode)
                     Spacer()
-                    Text("[←/→] Adjust Value")
+                    KeycapHint(keys: ["←", "→"], label: "Adjust", isDarkMode: isDarkMode)
                     Spacer()
-                    Text("[R] Reset")
+                    KeycapHint(keys: ["K"], label: "Keyboard", isDarkMode: isDarkMode)
                     Spacer()
-                    Text("[S] Pin/Unpin")
+                    KeycapHint(keys: ["R"], label: "Reset", isDarkMode: isDarkMode)
                     Spacer()
-                    Text("[ESC] Exit")
+                    KeycapHint(keys: ["C"], label: "Toggle", isDarkMode: isDarkMode)
+                    Spacer()
+                    KeycapHint(keys: ["ESC"], label: "Exit", isDarkMode: isDarkMode)
                 }
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.7))
                 .padding(.horizontal, 4)
+                .padding(.top, 2)
             }
-            .padding(24)
-            .frame(width: 680)
+            .padding(18)
+            .frame(width: 540)
             .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color(red: 0.04, green: 0.05, blue: 0.08).opacity(0.92))
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isDarkMode ? Color(red: 0.13, green: 0.13, blue: 0.14).opacity(0.92) : Color(red: 0.97, green: 0.97, blue: 0.98).opacity(0.95))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .stroke(
-                        LinearGradient(
-                            colors: [Color.cyan.opacity(0.9), Color.blue.opacity(0.5), Color.purple.opacity(0.7)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 2
+                        isDarkMode ? Color.white.opacity(0.14) : Color.black.opacity(0.12),
+                        lineWidth: 1
                     )
             )
-            .shadow(color: Color.cyan.opacity(0.35), radius: 24, x: 0, y: 8)
+            .shadow(
+                color: Color.black.opacity(isDarkMode ? 0.40 : 0.16),
+                radius: 20,
+                x: 0,
+                y: 8
+            )
+        }
+    }
+
+    private var calibrationSquares: some View {
+        let padding: CGFloat = 28
+        let squareSize: CGFloat = 46
+
+        return ZStack {
+            // Subtle alignment border guide connecting corners and edges
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(
+                    Color.accentColor.opacity(isDarkMode ? 0.20 : 0.15),
+                    style: StrokeStyle(lineWidth: 1, dash: [6, 6])
+                )
+                .padding(padding + squareSize / 2 - 6)
+
+            // 1. Top-Leading (Corner)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "TL")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(padding)
+
+            // 2. Top-Center (Edge)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "TC")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, padding)
+
+            // 3. Top-Trailing (Corner)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "TR")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(padding)
+
+            // 4. Center-Leading (Edge)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "CL")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .padding(.leading, padding)
+
+            // 5. Center-Trailing (Edge)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "CR")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+                .padding(.trailing, padding)
+
+            // 6. Bottom-Leading (Corner)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "BL")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(padding)
+
+            // 7. Bottom-Center (Edge)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "BC")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, padding)
+
+            // 8. Bottom-Trailing (Corner)
+            CalibrationSquare(isDarkMode: isDarkMode, size: squareSize, label: "BR")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(padding)
         }
     }
 
@@ -612,7 +693,8 @@ private struct WarpedSettingsCardContainer: View {
         case .keystone: return String(format: "%.2f", state.keystoneStrength)
         case .stretch: return String(format: "%.2f", state.stretchBalance)
         case .lookahead: return String(format: "%.2fs", state.lookaheadTime)
-        case .keyboardReflection: return String(format: "%.2f", state.keyboardReflection)
+        case .keyboardReflection:
+            return state.isKeyboardReflectionEnabled ? String(format: "%.2f", state.keyboardReflection) : "Off"
         case .keyboardTilt: return String(format: "%.2f", state.keyboardTilt)
         case .keyboardReach: return String(format: "%.2f", state.keyboardReach)
         case .keyboardBacklight: return String(format: "%.2f", state.keyboardBacklight)
@@ -627,7 +709,8 @@ private struct WarpedSettingsCardContainer: View {
         case .keystone: return Double(state.keystoneStrength / 1.0)
         case .stretch: return Double((state.stretchBalance - 0.01) / 1.49)
         case .lookahead: return Double(state.lookaheadTime / 0.5)
-        case .keyboardReflection: return Double(state.keyboardReflection / 1.0)
+        case .keyboardReflection:
+            return state.isKeyboardReflectionEnabled ? Double(state.keyboardReflection / 1.0) : 0.0
         case .keyboardTilt: return Double((state.keyboardTilt - 0.15) / 1.85)
         case .keyboardReach: return Double((state.keyboardReach - 0.12) / 0.53)
         case .keyboardBacklight: return Double(state.keyboardBacklight / 2.5)
@@ -643,51 +726,129 @@ private struct SettingRow: View {
     let isSelected: Bool
     let valueText: String
     let progress: Double
+    let isDarkMode: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Selection indicator
-            Text(isSelected ? "▶" : " ")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundStyle(isSelected ? Color.cyan : Color.clear)
-                .frame(width: 14)
+        HStack(spacing: 10) {
+            // Selection chevron
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.clear)
+                .frame(width: 10)
 
             // Parameter name
             Text(setting.title)
-                .font(.system(size: 12, weight: isSelected ? .bold : .medium))
-                .foregroundStyle(isSelected ? .white : .white.opacity(0.85))
-                .frame(width: 170, alignment: .leading)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.85))
+                .frame(width: 160, alignment: .leading)
 
             // Progress bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule()
-                        .fill(Color.white.opacity(0.12))
-                        .frame(height: 6)
+                        .fill(Color.primary.opacity(isDarkMode ? 0.12 : 0.08))
+                        .frame(height: 5)
 
                     Capsule()
                         .fill(
                             isSelected ?
-                            LinearGradient(colors: [Color.cyan, Color.blue], startPoint: .leading, endPoint: .trailing) :
-                            LinearGradient(colors: [Color.white.opacity(0.5), Color.white.opacity(0.3)], startPoint: .leading, endPoint: .trailing)
+                            Color.accentColor :
+                            Color.primary.opacity(isDarkMode ? 0.35 : 0.25)
                         )
-                        .frame(width: max(0, min(geo.size.width * CGFloat(progress), geo.size.width)), height: 6)
+                        .frame(width: max(0, min(geo.size.width * CGFloat(progress), geo.size.width)), height: 5)
                 }
                 .frame(maxHeight: .infinity, alignment: .center)
             }
-            .frame(height: 16)
+            .frame(height: 14)
 
-            // Value readout
+            // Value readout (monospaced digits for alignment, Apple system font)
             Text(valueText)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(isSelected ? Color.cyan : .white.opacity(0.9))
-                .frame(width: 65, alignment: .trailing)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular).monospacedDigit())
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .frame(width: 58, alignment: .trailing)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? Color.cyan.opacity(0.16) : Color.clear)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(isDarkMode ? 0.20 : 0.12) : Color.clear)
         )
     }
 }
+
+// MARK: - Native Apple Keycap Hint
+private struct KeycapHint: View {
+    let keys: [String]
+    let label: String
+    let isDarkMode: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            HStack(spacing: 2) {
+                ForEach(keys, id: \.self) { key in
+                    Text(key)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.primary.opacity(0.9))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .fill(isDarkMode ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+                        )
+                }
+            }
+            Text(label)
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(Color.secondary)
+        }
+    }
+}
+// MARK: - Calibration Square
+private struct CalibrationSquare: View {
+    let isDarkMode: Bool
+    var size: CGFloat = 46
+    var label: String? = nil
+
+    var body: some View {
+        ZStack {
+            // Background plate
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isDarkMode ? Color(red: 0.13, green: 0.13, blue: 0.14).opacity(0.88) : Color(red: 0.97, green: 0.97, blue: 0.98).opacity(0.92))
+
+            // Outer border
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(isDarkMode ? Color.white.opacity(0.25) : Color.black.opacity(0.20), lineWidth: 1)
+
+            // Concentric inner calibration square
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.75), lineWidth: 1)
+                .frame(width: size * 0.44, height: size * 0.44)
+
+            // Precision crosshair lines
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.60))
+                .frame(width: size * 0.72, height: 1)
+
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.60))
+                .frame(width: 1, height: size * 0.72)
+
+            // Center fiducial pin
+            Circle()
+                .fill(Color.accentColor)
+                .frame(width: 4, height: 4)
+
+            // Subtle label badge
+            if let label = label {
+                Text(label)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Color.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                    .padding(3)
+            }
+        }
+        .frame(width: size, height: size)
+        .shadow(color: Color.black.opacity(isDarkMode ? 0.35 : 0.12), radius: 8, x: 0, y: 3)
+    }
+}
+

@@ -151,6 +151,7 @@ final class AutoPerspectiveManager: ObservableObject {
 
     private func handleDwellTimeout() {
         guard overlayController.isShowing, !overlayController.isSettling else { return }
+        guard !overlayController.viewState.showCalibrator else { return }
         let currentAngle = sensor.displayAngle
         guard currentAngle >= minUsableAngle && currentAngle < closeThreshold else { return }
 
@@ -164,8 +165,14 @@ final class AutoPerspectiveManager: ObservableObject {
         }
     }
 
-    func triggerPerspective() {
-        guard !isCapturing && !overlayController.isShowing else { return }
+    func triggerPerspective(showCalibrator: Bool = false) {
+        guard !isCapturing && !overlayController.isShowing else {
+            if overlayController.isShowing && showCalibrator {
+                overlayController.viewState.showCalibrator = true
+                overlayController.viewState.requestRender()
+            }
+            return
+        }
         isCapturing = true
         dwellTimerTask?.cancel()
         dwellTimerTask = nil
@@ -176,10 +183,10 @@ final class AutoPerspectiveManager: ObservableObject {
             guard let self = self else { return }
             if let snapshot = await self.captureManager.captureCurrentScreen() {
                 self.dwellReferenceAngle = self.sensor.displayAngle
-                if self.isAutoSettleEnabled {
+                if self.isAutoSettleEnabled && !showCalibrator {
                     self.scheduleDwellTimer()
                 }
-                self.overlayController.show(snapshot: snapshot, sensor: self.sensor) { [weak self] in
+                self.overlayController.show(snapshot: snapshot, sensor: self.sensor, showCalibrator: showCalibrator) { [weak self] in
                     self?.handleOverlayDismissed()
                 }
                 self.statusDescription = "Perspective active"
