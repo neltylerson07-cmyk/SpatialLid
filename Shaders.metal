@@ -68,20 +68,34 @@ static KeyGeometry getKeyGeometry(int rowIndex, float u, float relV) {
 
     if (rowIndex == 0) {
         // FUNCTION ROW: 14 keys (Esc, 12 F-keys, Touch ID sensor)
-        const float B[15] = {0.0f, 0.095f, 0.161f, 0.227f, 0.293f, 0.359f, 0.425f, 0.491f, 0.557f, 0.623f, 0.689f, 0.755f, 0.821f, 0.887f, 1.0f};
-        for (int i = 0; i < 14; ++i) {
-            if (u <= B[i + 1] || i == 13) {
-                float left = B[i] + gapU * 0.5f;
-                float right = B[i + 1] - gapU * 0.5f;
-                g.centerU = (left + right) * 0.5f;
-                g.halfWU = max((right - left) * 0.5f, 0.005f);
-                if (i == 0) g.isOuterCorner = true; // Esc top-left fillet
-                if (i == 13) {
-                    g.isTouchId = true;
-                    g.isOuterCorner = true; // Touch ID top-right fillet
-                }
-                break;
-            }
+        // Esc: 0.000 -> 0.102 (elongated Escape key)
+        // F1..F12: 12 keys evenly spaced from 0.106 to 0.922 (width 0.068 each)
+        // Touch ID: distinct compact square key at 0.930 -> 0.998 (width 0.068)
+        if (u < 0.102f) {
+            float left = gapU * 0.5f;
+            float right = 0.102f - gapU * 0.5f;
+            g.centerU = (left + right) * 0.5f;
+            g.halfWU = max((right - left) * 0.5f, 0.005f);
+            g.isOuterCorner = true; // Esc top-left fillet
+        } else if (u < 0.106f) {
+            g.isKey = false; // Gap between Esc and F1
+        } else if (u < 0.922f) {
+            int fIdx = int(floor((u - 0.106f) / 0.068f));
+            fIdx = clamp(fIdx, 0, 11);
+            float left = 0.106f + float(fIdx) * 0.068f + gapU * 0.5f;
+            float right = 0.106f + float(fIdx + 1) * 0.068f - gapU * 0.5f;
+            g.centerU = (left + right) * 0.5f;
+            g.halfWU = max((right - left) * 0.5f, 0.005f);
+        } else if (u < 0.930f) {
+            g.isKey = false; // Aluminum separator between F12 and Touch ID
+        } else {
+            float left = 0.930f + gapU * 0.5f;
+            float right = 0.998f - gapU * 0.5f;
+            g.centerU = (left + right) * 0.5f;
+            g.halfWU = max((right - left) * 0.5f, 0.005f);
+            g.halfHV = 0.36f; // Compact square keycap
+            g.isTouchId = true;
+            g.isOuterCorner = true; // Touch ID top-right fillet
         }
     } else if (rowIndex == 1) {
         // NUMBER ROW: 14 keys (~, 1..0, -, =, Delete)
@@ -193,7 +207,7 @@ static float4 sampleKeyboardReflection(float2 finalUV,
                                         texture2d<float> blurredTexture,
                                         sampler textureSampler) {
     const float uprightRad = 1.5707963f; // 90° in radians
-    const float minAngleRad = 0.7853982f; // 45° in radians (pi / 4)
+    const float minAngleRad = 0.87266f; // 45° in radians (pi / 4)
 
     if (currentTheta <= minAngleRad || currentTheta >= uprightRad) {
         return float4(0.0f);
@@ -339,26 +353,36 @@ static float4 sampleKeyboardReflection(float2 finalUV,
         float rawKeyMask = smoothstep(keyEdgeBlur, -keyEdgeBlur, dist);
         float keyMask = mix(0.5f, rawKeyMask, gridContrast);
 
-        // 2. Dish shading & specular glint catching direct screen light:
-        float glintExtent = mix(keyHalfH * 0.30f, keyHalfH * 0.95f, rowBlur);
-        float topEdgeGlint = smoothstep(glintExtent, keyHalfH, vY - keyCenterY) * (0.18f * (1.0f - 0.65f * rowBlur));
-        float dishShading = 1.0f - mix(0.22f, 0.04f, rowBlur) * length(float2((X - keyCenterX) / keyHalfW, (vY - keyCenterY) / keyHalfH));
+        // 2. Reversed Dish Shading & Crisp Specular Glint:
+        // Sharp, defined specular glint focused on the bevel edge facing the display hinge
+        float bevelStart = mix(keyHalfH * 0.78f, keyHalfH * 0.92f, rowBlur);
+        float bevelEnd = keyHalfH * 0.99f;
+        float edgeGlintRaw = smoothstep(bevelStart, bevelEnd, -(vY - keyCenterY));
+        float edgeGlint = pow(edgeGlintRaw, 2.2f) * (1.0f - 0.55f * rowBlur);
         
-        // Keycap color: matte black base plastic + diffuse screen illumination + specular edge glint reflecting screen content
-        float3 basePlastic = float3(0.055f, 0.056f, 0.062f) * dishShading;
+        // Gracefully taper at the rounded lateral corners
+        float cornerFade = smoothstep(keyHalfW, keyHalfW * 0.65f, abs(X - keyCenterX));
+        edgeGlint *= cornerFade;
+
+        float dishShading = 1.0f - mix(0.18f, 0.04f, rowBlur) * length(float2((X - keyCenterX) / keyHalfW, (vY - keyCenterY) / keyHalfH));
+        float bevelSlope = 1.0f + 0.10f * clamp(-(vY - keyCenterY) / keyHalfH, -1.0f, 1.0f);
+        
+        // Keycap color: matte black base plastic + diffuse screen illumination + sharp specular edge glint
+        float3 basePlastic = float3(0.055f, 0.056f, 0.062f) * dishShading * bevelSlope;
         float3 keyCapDiffuse = basePlastic + screenRadiance * float3(0.22f, 0.22f, 0.25f) * screenLightIntensity;
-        float3 keyCapSpecular = screenLightDirect * (topEdgeGlint * 2.0f) * screenLightIntensity;
+        float3 keyCapSpecular = screenLightDirect * (edgeGlint * 0.55f) * screenLightIntensity;
         float3 keyCap = keyCapDiffuse + keyCapSpecular;
 
         // Distinct Touch ID sensor key:
-        // A clean matte black key with a subtle, dark recessed circular sensor ring.
+        // A clean, compact matte black key with a subtle, dark recessed circular sensor ring.
         // It has NO backlight glow and NO printed legend (matches authentic Apple hardware).
         if (geo.isTouchId) {
             float physAspect = 0.80f / max(tilt, 0.10f);
             float2 localCoord = float2(X - keyCenterX, (vY - keyCenterY) * physAspect);
-            float circleR = keyHalfH * 0.65f * physAspect;
+            float keyRadius = min(keyHalfW, keyHalfH * physAspect);
+            float circleR = keyRadius * 0.58f;
             float ringDist = abs(length(localCoord) - circleR);
-            float ring = smoothstep(mix(0.0015f, 0.0035f, rowBlur), 0.0f, ringDist);
+            float ring = smoothstep(mix(0.0012f, 0.0030f, rowBlur), 0.0f, ringDist);
             float inSensor = smoothstep(0.0f, -0.002f, length(localCoord) - circleR);
 
             // Darker sapphire sensor surface inside the ring
@@ -396,10 +420,11 @@ static float4 sampleKeyboardReflection(float2 finalUV,
         }
 
         // 4. Perimeter backlight glow dispersal (Touch ID key is not backlit):
-        float glowBrightness = geo.isTouchId ? 0.0f : clamp(uniforms.keyboardBacklight, 0.0f, 2.5f) * mix(1.0f, 0.45f, rowDepthProgress);
-        float glowSpread = mix(450.0f, 65.0f, clamp(rowBlur, 0.0f, 1.0f));
+        // Significantly reduced opacity for a soft, subtle, realistic key perimeter glow
+        float glowBrightness = geo.isTouchId ? 0.0f : clamp(uniforms.keyboardBacklight, 0.0f, 2.5f) * 0.35f * mix(1.0f, 0.35f, rowDepthProgress);
+        float glowSpread = mix(500.0f, 85.0f, clamp(rowBlur, 0.0f, 1.0f));
         float glow = exp(-max(dist, 0.0f) * glowSpread) * glowBrightness;
-        float3 backlight = float3(0.92f, 0.95f, 1.0f) * 0.85f;
+        float3 backlight = float3(0.82f, 0.88f, 0.96f) * 0.45f;
         
         // Crevice ambient occlusion: key wells are naturally shaded from direct overhead screen light
         float creviceAO = mix(0.40f, 1.0f, keyMask);
@@ -512,8 +537,8 @@ fragment float4 fragment_main(RasterizerData in [[stage_in]],
     float4 frameColor = mix(sharpColor, blurredColor, localBlur);
 
     // 5. Progressive Depth Shadow (Delayed to <= 70°)
-    const shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
-    const shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
+    const float shadowStartAngleRad = 70.0f * (3.14159265f / 180.0f);
+    const float shadowFullAngleRad  = 30.0f * (3.14159265f / 180.0f);
     float shadowActivation = smoothstep(shadowStartAngleRad, shadowFullAngleRad, targetAngle);
 
     float maxShadowTop = 2.0f;

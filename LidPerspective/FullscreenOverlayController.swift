@@ -162,11 +162,11 @@ final class OverlayViewState: ObservableObject {
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
     @Published var lookaheadTime: Double = 0.18
-    @Published var keyboardReflection: Float = 0.48
-    @Published var keyboardTilt: Float = 0.35
+    @Published var keyboardReflection: Float = 0.44
+    @Published var keyboardTilt: Float = 0.40
     @Published var keyboardReach: Float = 0.38
     @Published var keyboardBacklight: Float = 1.50
-    @Published var keyboardOffset: Float = -0.02
+    @Published var keyboardOffset: Float = -0.01
     @Published var keyboardWidth: Float = 0.88
     @Published var keyboardDepthBlur: Float = 0.30
 
@@ -415,11 +415,11 @@ private struct FullscreenPerspectiveContainer: View {
                             state.keystoneStrength = 0.18
                             state.stretchBalance = 0.56
                             state.lookaheadTime = 0.18
-                            state.keyboardReflection = 0.48
-                            state.keyboardTilt = 0.35
+                            state.keyboardReflection = 0.44
+                            state.keyboardTilt = 0.40
                             state.keyboardReach = 0.38
                             state.keyboardBacklight = 1.50
-                            state.keyboardOffset = -0.02
+                            state.keyboardOffset = -0.01
                             state.keyboardWidth = 0.88
                             state.keyboardDepthBlur = 0.30
                         }

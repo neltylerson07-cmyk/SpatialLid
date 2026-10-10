@@ -10,11 +10,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
     var lookahead: Double = 0.18
     var keystoneStrength: Float
     var stretchBalance: Float
-    var keyboardReflection: Float = 0.48
-    var keyboardTilt: Float = 0.35
+    var keyboardReflection: Float = 0.44
+    var keyboardTilt: Float = 0.40
     var keyboardReach: Float = 0.38
     var keyboardBacklight: Float = 1.50
-    var keyboardOffset: Float = -0.02
+    var keyboardOffset: Float = -0.01
     var keyboardWidth: Float = 0.88
     var keyboardDepthBlur: Float = 0.30
     var isSettling: Bool = false
@@ -99,11 +99,11 @@ struct PerspectiveMetalView: NSViewRepresentable {
         private var smoothedAngle: Double = 90.0
         private var keystoneStrength: Float = 0.18
         private var stretchBalance: Float = 0.56
-        private var keyboardReflection: Float = 0.48
-        private var keyboardTilt: Float = 0.35
+        private var keyboardReflection: Float = 0.44
+        private var keyboardTilt: Float = 0.40
         private var keyboardReach: Float = 0.38
         private var keyboardBacklight: Float = 1.50
-        private var keyboardOffset: Float = -0.02
+        private var keyboardOffset: Float = -0.01
         private var keyboardWidth: Float = 0.88
         private var keyboardDepthBlur: Float = 0.30
 
