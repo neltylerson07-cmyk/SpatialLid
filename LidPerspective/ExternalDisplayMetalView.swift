@@ -9,7 +9,7 @@ struct ExternalDisplayMetalView: NSViewRepresentable {
     var preloadedBlurredTexture: MTLTexture? = nil
     var sensor: LidSensor? = nil
     var fallbackAngle: Double = 90.0
-    var lookahead: Double = 0.18
+    var lookahead: Double = 0.4
     var activationCount: Int = 0
     var maxZoomOut: Float = 0.10
     var maxBlur: Float = 1.00
@@ -77,7 +77,7 @@ struct ExternalDisplayMetalView: NSViewRepresentable {
     final class Coordinator: NSObject, MTKViewDelegate {
         var onFirstFrame: (() -> Void)?
         var sensor: LidSensor?
-        var lookahead: Double = 0.18
+        var lookahead: Double = 0.4
         var activationCount: Int = -1
 
         func reset(angle: Double) {

@@ -13,7 +13,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
     var isClockActive: Bool = false
     var sensor: LidSensor? = nil
     var fallbackAngle: Double = 90.0
-    var lookahead: Double = 0.18
+    var lookahead: Double = 0.4
     var activationCount: Int = 0
     var keystoneStrength: Float
     var stretchBalance: Float
@@ -108,7 +108,7 @@ struct PerspectiveMetalView: NSViewRepresentable {
     final class Coordinator: NSObject, MTKViewDelegate {
         var onFirstFrame: (() -> Void)?
         var sensor: LidSensor?
-        var lookahead: Double = 0.18
+        var lookahead: Double = 0.4
         var activationCount: Int = -1
 
         func reset(angle: Double) {

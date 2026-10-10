@@ -583,7 +583,7 @@ final class OverlayViewState: ObservableObject {
     @Published var keystoneStrength: Float = 0.18
     @Published var stretchBalance: Float = 0.56
     @Published var lowAngleCompensation: Float = 1.00
-    @Published var lookaheadTime: Double = 0.18
+    @Published var lookaheadTime: Double = 0.4
     @Published var activationCount: Int = 0
     @Published var isKeyboardReflectionEnabled: Bool = true
     @Published var keyboardReflection: Float = 0.44
@@ -688,7 +688,7 @@ final class OverlayViewState: ObservableObject {
         keystoneStrength = 0.18
         stretchBalance = 0.56
         lowAngleCompensation = 1.00
-        lookaheadTime = 0.18
+        lookaheadTime = 0.4
         isKeyboardReflectionEnabled = true
         keyboardReflection = 0.44
         isFrostedGlassEnabled = true

@@ -48,14 +48,14 @@ final class LidSensor: ObservableObject {
         let totalForwardTime = elapsedSinceSample + lookahead
         var forwardDelta = effectiveVelocity * totalForwardTime
 
-        // When lifting the lid up (effectiveVelocity > 0), maintain natural direction
-        // but reduce the forward lookahead strength (0.30) and cap lead degrees so it doesn't race ahead
+        // When lifting the lid up (effectiveVelocity > 0), make velocity stronger
+        // so the animation leads forward responsively and unwarps cleanly
         if effectiveVelocity > 0 {
-            forwardDelta *= -0.5
+            forwardDelta *= 0.25
         }
 
-        // Soft-clamp the maximum projection delta
-        let maxLeadDegrees = effectiveVelocity > 0 ? 3.5 : 12.0
+        // Soft-clamp the maximum projection delta to prevent jarring overshoot
+        let maxLeadDegrees = effectiveVelocity > 0 ? 18.0 : 12.0
         forwardDelta = min(max(forwardDelta, -maxLeadDegrees), maxLeadDegrees)
 
         let projected = angle + forwardDelta
